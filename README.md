@@ -3,8 +3,8 @@
 Atlas is an AI Software Engineering Control Plane. V0.1 is a **headless orchestration
 engine** built in stages. Milestone 1 laid the project foundation; Milestone 2 added
 the **core domain model**; Milestone 3 added the **deterministic Git worktree engine**;
-Milestone 4 adds the **workspace service** that assigns tasks to workers with
-isolated worktrees. No scheduling or execution yet.
+Milestone 4 added the **workspace service**; Milestone 5 adds **repository analysis
+and resource claims** for reasoning about safe parallel execution. No scheduling yet.
 
 ## Scope (V0.1 so far)
 
@@ -17,7 +17,9 @@ Included:
 - Core domain model: 13 entities, explicit state machines, deterministic invariants
 - Git worktree engine: repository inspection + isolated worktree lifecycle (`src/git/`)
 - Workspace service: explicit task→worker assignment with isolated worktrees (`src/workspaces/`)
-- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces)
+- Repository analysis + resource claims: structural resource maps and deterministic
+  conflict detection (`src/analyzer/`, `src/claims/`)
+- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims)
 
 Explicitly NOT included (per AGENTS.md):
 
@@ -44,6 +46,11 @@ Explicitly NOT included (per AGENTS.md):
 - `src/workspaces/` coordinates the two: `assignTaskToWorker` validates,
   creates the worktree, then persists Workspace + links + transitions +
   `TASK_ASSIGNED` event in one Prisma transaction.
+- `src/analyzer/` maps a repository to a deterministic resource map pinned to
+  a Git commit (tracked files only, via `git ls-files`).
+- `src/claims/` models explicit task resource claims (`READ`/`WRITE`),
+  normalizes them, and detects conflicts deterministically — the input a
+  future scheduler will use to judge parallel safety.
 
 ## Core domain model (Milestone 2)
 
@@ -128,6 +135,45 @@ busy, wrong states) are rejected with typed errors.
 **Known limitation:** cross-feature task dependencies remain rejected
 (Milestone 2 rule, unchanged); DAG/dependency logic belongs to a later
 milestone.
+
+## Repository analysis + resource claims (Milestone 5)
+
+**Why claims matter:** Atlas must not decide parallelism from coarse labels
+("frontend" vs "backend"). It reasons about actual resources: two tasks
+touching disjoint files may run concurrently, while two tasks writing the
+same file — no matter how different their descriptions sound — conflict.
+This milestone builds that deterministic representation. It does **not**
+schedule workers; it only produces the conflict information a scheduler needs.
+
+**Repository analysis** (`src/analyzer/`): `analyzeRepository(repoPath)` lists
+Git-tracked files (`git ls-files`; never `.git/`, `node_modules`, or OS
+droppings; untracked files are out of scope for V0.1), classifies each into a
+small vocabulary (`FILE`, `DIRECTORY`, `CONFIG`, `SCHEMA`, `MIGRATION`,
+`PACKAGE_MANIFEST`, `LOCKFILE`, `TEST`, `SOURCE`), adds ancestor directories,
+and returns `{ repositoryRoot, analyzedCommit, resources }` sorted
+deterministically. Same repo + same commit ⇒ same map.
+
+**Resource claims** (`src/claims/`): callers submit explicit claims
+(`createTaskClaims({ taskId, claims: [{ resource, access }] })` — never
+LLM-inferred). Paths normalize to canonical repo-relative ids (`./x` →
+`x`, backslashes folded, absolute paths/`..`/`.git` rejected); access is
+`READ` (shareable) or `WRITE` (exclusive, and may name a file the task will
+create — `WRITE` of an absent file is legal, `READ` is not). Claims persist
+in the existing `Task.resourceClaims` column (single store, no competing
+table) and are deduplicated + sorted, so resubmission is byte-identical.
+
+**Conflicts** (`compareClaimSets`): `READ+READ` shares; any `WRITE` on
+overlapping resources conflicts (`WRITE_WRITE`, `READ_WRITE`, `WRITE_READ`).
+Overlap is segment-wise hierarchy — `src/auth/` contains `src/auth/login.ts`
+but never `src/authentication/login.ts`.
+
+```text
+Task A:  WRITE src/auth/login.ts      Task B:  WRITE src/dashboard/page.tsx
+→ no resource conflict
+
+Task C:  WRITE prisma/schema.prisma   Task D:  WRITE prisma/schema.prisma
+→ CONFLICT (WRITE_WRITE)
+```
 
 ## Prerequisites
 
