@@ -7,15 +7,326 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Atlas V0.1 foundation: orchestration state ONLY.
+// Atlas V0.1: orchestration state ONLY.
 // Git remains the source of truth for source code — never store source code here.
-// This minimal Project registry proves SQLite/Prisma connectivity and gives
-// future milestones (planner, DAG, workers) a stable root entity to reference.
+// No source-code blobs, no file contents, no full histories: only metadata,
+// references (paths, SHAs, URIs), lifecycle state, and append-only events.
+
+// ---------- Lifecycle enums ----------
+
+enum ProjectStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum FeatureStatus {
+  DRAFT
+  PLANNED
+  READY
+  IN_PROGRESS
+  VERIFICATION
+  COMPLETED
+  CANCELLED
+}
+
+enum TaskStatus {
+  PENDING
+  READY
+  CLAIMED
+  IN_PROGRESS
+  BLOCKED
+  VERIFICATION
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum WorkerStatus {
+  IDLE
+  ASSIGNED
+  RUNNING
+  VERIFYING
+  COMPLETED
+  FAILED
+  STOPPED
+}
+
+enum WorkspaceStatus {
+  CREATING
+  READY
+  IN_USE
+  VERIFYING
+  CLEANED
+  FAILED
+}
+
+enum ArtifactType {
+  PATCH
+  COMMIT
+  TEST_REPORT
+  BUILD_REPORT
+  ANALYSIS_REPORT
+}
+
+enum TestRunStatus {
+  PENDING
+  RUNNING
+  PASSED
+  FAILED
+  CANCELLED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum EventType {
+  FEATURE_CREATED
+  TASK_CREATED
+  TASK_STARTED
+  WORKER_ASSIGNED
+  TEST_STARTED
+  TEST_PASSED
+  TEST_FAILED
+  APPROVAL_REQUESTED
+  APPROVAL_GRANTED
+  APPROVAL_REJECTED
+}
+
+// ---------- Roots ----------
 
 model Project {
-  id        String   @id @default(cuid())
-  name      String
-  repoPath  String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          String        @id @default(cuid())
+  name        String
+  description String?
+  status      ProjectStatus @default(ACTIVE)
+  // Legacy foundation field (V0.1 milestone 1). New code must use Repository.
+  repoPath    String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  repositories Repository[]
+  features     Feature[]
+  events       Event[]
+}
+
+model Repository {
+  id            String   @id @default(cuid())
+  projectId     String
+  name          String
+  localPath     String
+  remoteUrl     String?
+  defaultBranch String   @default("main")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  project Project  @relation(fields: [projectId], references: [id])
+  commits Commit[]
+
+  @@unique([projectId, name])
+  @@index([projectId])
+}
+
+model Feature {
+  id          String        @id @default(cuid())
+  projectId   String
+  title       String
+  description String?
+  status      FeatureStatus @default(DRAFT)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  project   Project    @relation(fields: [projectId], references: [id])
+  tasks     Task[]
+  approvals Approval[]
+  events    Event[]
+
+  @@index([projectId])
+}
+
+// ---------- Work graph ----------
+
+model Task {
+  id             String     @id @default(cuid())
+  featureId      String
+  title          String
+  description    String?
+  status         TaskStatus @default(PENDING)
+  priority       Int        @default(0)
+  // JSON-encoded ResourceClaim[] ({ path, mode }). Paths only — never contents.
+  resourceClaims String     @default("[]")
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  feature   Feature    @relation(fields: [featureId], references: [id])
+  worker    Worker?
+  contract  Contract?
+  artifacts Artifact[]
+  testRuns  TestRun[]
+  approvals Approval[]
+  events    Event[]
+  commits   Commit[]
+
+  // Outgoing edges: tasks THIS task depends on (prerequisites).
+  dependencies TaskDependency[] @relation("TaskDependsOn")
+  // Incoming edges: tasks that depend on THIS task.
+  dependents   TaskDependency[] @relation("TaskPrerequisiteFor")
+
+  @@index([featureId])
+}
+
+model TaskDependency {
+  id              String   @id @default(cuid())
+  // The task that is blocked until its prerequisite completes.
+  taskId          String
+  // The prerequisite task that must complete first.
+  dependsOnTaskId String
+  createdAt       DateTime @default(now())
+
+  task      Task @relation("TaskDependsOn", fields: [taskId], references: [id], onDelete: Cascade)
+  dependsOn Task @relation("TaskPrerequisiteFor", fields: [dependsOnTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, dependsOnTaskId])
+  @@index([dependsOnTaskId])
+}
+
+// ---------- Execution (model only — no worker execution in V0.1) ----------
+
+model Worker {
+  id        String       @id @default(cuid())
+  taskId    String?      @unique
+  status    WorkerStatus @default(IDLE)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  task      Task?      @relation(fields: [taskId], references: [id])
+  workspace Workspace?
+}
+
+model Workspace {
+  id        String          @id @default(cuid())
+  workerId  String?         @unique
+  // Filesystem location (e.g. future Git worktree path). Location only.
+  path      String
+  branch    String?
+  status    WorkspaceStatus @default(CREATING)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  worker  Worker?  @relation(fields: [workerId], references: [id])
+  commits Commit[]
+}
+
+// ---------- Outputs, verification, history ----------
+
+model Artifact {
+  id          String       @id @default(cuid())
+  taskId      String
+  type        ArtifactType
+  label       String?
+  // Reference to the evidence (file path, URI). Never a source-code blob.
+  location    String?
+  contentHash String?
+  createdAt   DateTime     @default(now())
+
+  task     Task      @relation(fields: [taskId], references: [id])
+  testRuns TestRun[]
+
+  @@index([taskId])
+}
+
+model Contract {
+  id           String   @id @default(cuid())
+  taskId       String   @unique
+  title        String?
+  requirements String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  task Task @relation(fields: [taskId], references: [id])
+}
+
+model TestRun {
+  id         String        @id @default(cuid())
+  taskId     String
+  artifactId String?
+  status     TestRunStatus @default(PENDING)
+  name       String?
+  // JSON-encoded metadata (command, suite, durationMs, ...).
+  metadata   String?
+  exitCode   Int?
+  startedAt  DateTime?
+  finishedAt DateTime?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  task     Task      @relation(fields: [taskId], references: [id])
+  artifact Artifact? @relation(fields: [artifactId], references: [id])
+
+  @@index([taskId])
+}
+
+model Commit {
+  id           String   @id @default(cuid())
+  repositoryId String
+  taskId       String?
+  workspaceId  String?
+  // Full or abbreviated Git SHA (hex). Metadata only — history lives in Git.
+  sha          String
+  branch       String?
+  subject      String?
+  createdAt    DateTime @default(now())
+
+  repository Repository @relation(fields: [repositoryId], references: [id])
+  task       Task?      @relation(fields: [taskId], references: [id])
+  workspace  Workspace? @relation(fields: [workspaceId], references: [id])
+
+  @@unique([repositoryId, sha])
+  @@index([taskId])
+}
+
+// Append-only at the application layer: the domain service exposes create/list
+// only — no update or delete operations exist for events.
+model Event {
+  id        String    @id @default(cuid())
+  type      EventType
+  projectId String?
+  featureId String?
+  taskId    String?
+  actor     String?
+  // JSON-encoded structured metadata.
+  payload   String?
+  createdAt DateTime  @default(now())
+
+  project Project? @relation(fields: [projectId], references: [id])
+  feature Feature? @relation(fields: [featureId], references: [id])
+  task    Task?    @relation(fields: [taskId], references: [id])
+
+  @@index([projectId])
+  @@index([taskId])
+}
+
+// Human approval. The decision is explicit: rows are created PENDING and move
+// to APPROVED/REJECTED exactly once via decideApproval (actor + timestamp).
+// No authentication in V0.1 — actor is an opaque identifier string.
+model Approval {
+  id        String         @id @default(cuid())
+  featureId String?
+  taskId    String?
+  status    ApprovalStatus @default(PENDING)
+  actor     String?
+  context   String?
+  note      String?
+  decidedAt DateTime?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  feature Feature? @relation(fields: [featureId], references: [id])
+  task    Task?    @relation(fields: [taskId], references: [id])
+
+  @@index([featureId])
+  @@index([taskId])
 }

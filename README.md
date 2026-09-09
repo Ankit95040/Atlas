@@ -1,9 +1,10 @@
-# Atlas V0.1 — Foundation
+# Atlas V0.1 — Foundation + Core Domain Model
 
 Atlas is an AI Software Engineering Control Plane. V0.1 is a **headless orchestration
-engine** built in stages. This milestone is the **project foundation only**.
+engine** built in stages. Milestone 1 laid the project foundation; Milestone 2 adds
+the **core domain model and its persistence/validation layer**. No orchestration yet.
 
-## Scope (V0.1 foundation)
+## Scope (V0.1 so far)
 
 Included:
 
@@ -11,22 +12,56 @@ Included:
 - Minimal CLI (`atlas --help`, `atlas doctor`) built with Commander
 - Configuration validation with Zod
 - Prisma + SQLite orchestration-state database (no source code in the DB)
-- Vitest test suite (config, doctor, database)
+- Core domain model: 13 entities, explicit state machines, deterministic invariants
+- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence)
 
 Explicitly NOT included (per AGENTS.md):
 
-- AI workers, DAG, Git worktrees, Docker worker execution
+- Orchestration, scheduling, worker execution, Docker worktrees
+- AI workers, DAG execution, Git worktree management
 - Web UI, React, spatial/island UI
-- Redis, WebSockets, auth, multi-user
+- Redis, queues, WebSockets, auth, multi-user
 - Semantic merge, live rebase
 
 ## Architecture
 
 - **Git** is the source of truth for source code.
 - **SQLite (via Prisma)** stores Atlas orchestration state only
-  (e.g. `Project` registry). Never store source code in the database.
+  (lifecycle, assignments, metadata, references, append-only events).
+  Never store source code in the database: no blobs, no file contents,
+  no histories — only paths, SHAs, URIs, and hashes.
 - `src/` is modular so future systems slot in without rewiring:
   `cli/ config/ core/ db/ git/ workers/ planner/ analyzer/ dag/ verification/`
+- `src/core/` is the domain layer: `enums` (lifecycle vocabulary),
+  `inputs` (Zod boundary DTOs), `validation` (deterministic invariants),
+  `transitions` (explicit state machines), `errors` (domain errors),
+  `service` (minimal create/transition/record operations).
+
+## Core domain model (Milestone 2)
+
+Entities (all persisted via Prisma + SQLite, validated via Zod at the boundary):
+
+| Entity | Role |
+| ------ | ---- |
+| `Project` | Orchestration root; owns repositories and features (`ACTIVE/PAUSED/ARCHIVED`) |
+| `Repository` | Source repo pointer: local path, remote URL, default branch |
+| `Feature` | Requested change; owns tasks (`DRAFT…COMPLETED/CANCELLED`) |
+| `Task` | One executable work unit; priority + JSON resource claims (`path` + `read/write`) |
+| `TaskDependency` | Directed edge: `taskId` waits on `dependsOnTaskId`; same feature only, never self |
+| `Worker` | AI worker record; links to one task (`IDLE…COMPLETED/FAILED/STOPPED`) |
+| `Workspace` | Isolated workspace record: path/branch; links to one worker |
+| `Artifact` | Evidence reference (patch/commit/test/build/analysis report) — metadata only |
+| `Contract` | Acceptance contract per task (one-to-one) for future verification |
+| `TestRun` | Verification execution (`PENDING→RUNNING→PASSED/FAILED`) with timestamps |
+| `Commit` | Git commit metadata known to Atlas (SHA + branch/workspace); history stays in Git |
+| `Event` | Append-only orchestration log (create/list only — no update/delete API) |
+| `Approval` | Explicit human decision: created `PENDING`, decided once (`APPROVED/REJECTED` + actor + timestamp) |
+
+Key invariants (deterministic, tested): required fields reject empty input;
+self-dependencies and cross-feature edges rejected; duplicate edges, contracts,
+and per-repo commit SHAs rejected; invalid state transitions rejected
+(same-state is an idempotent no-op); approvals need a target and an explicit
+decision; commit SHAs must be 7–40 hex chars.
 
 ## Prerequisites
 
