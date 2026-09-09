@@ -1,8 +1,9 @@
 # Atlas V0.1 — Foundation + Core Domain Model
 
 Atlas is an AI Software Engineering Control Plane. V0.1 is a **headless orchestration
-engine** built in stages. Milestone 1 laid the project foundation; Milestone 2 adds
-the **core domain model and its persistence/validation layer**. No orchestration yet.
+engine** built in stages. Milestone 1 laid the project foundation; Milestone 2 added
+the **core domain model**; Milestone 3 adds the **deterministic Git worktree engine**
+for isolated worker workspaces. No orchestration yet.
 
 ## Scope (V0.1 so far)
 
@@ -13,15 +14,16 @@ Included:
 - Configuration validation with Zod
 - Prisma + SQLite orchestration-state database (no source code in the DB)
 - Core domain model: 13 entities, explicit state machines, deterministic invariants
-- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence)
+- Git worktree engine: repository inspection + isolated worktree lifecycle (`src/git/`)
+- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git)
 
 Explicitly NOT included (per AGENTS.md):
 
-- Orchestration, scheduling, worker execution, Docker worktrees
-- AI workers, DAG execution, Git worktree management
+- Orchestration, scheduling, worker execution, Docker execution
+- AI workers, DAG execution
 - Web UI, React, spatial/island UI
 - Redis, queues, WebSockets, auth, multi-user
-- Semantic merge, live rebase
+- Semantic merge, live rebase, automatic merge to main
 
 ## Architecture
 
@@ -62,6 +64,35 @@ self-dependencies and cross-feature edges rejected; duplicate edges, contracts,
 and per-repo commit SHAs rejected; invalid state transitions rejected
 (same-state is an idempotent no-op); approvals need a target and an explicit
 decision; commit SHAs must be 7–40 hex chars.
+
+## Git worktree engine (Milestone 3)
+
+**Why worktrees:** every coding worker must receive an isolated Git worktree and
+never operate on the main working tree. A worker gone wrong can only dirty its
+own worktree; the main checkout stays clean, reviewable, and human-controlled.
+Later milestones map `Task → Worker → Workspace → worktree path/branch`.
+
+**What this milestone supports** (`src/git/`, Git CLI only, no new dependencies):
+
+- `runGit(args, { cwd })` — no-shell execution with captured stdout/stderr/exit code
+- Inspection: `validateRepository`, `getRepositoryRoot`, `getCurrentBranch`
+  (null when detached), `getCurrentCommit`, `getStatus`/`isClean`
+  (staged vs unstaged vs untracked)
+- Branches: `assertValidBranchName`, `branchExists`, `createBranch`
+- Lifecycle: `createWorktree` (`git worktree add -b <branch> <path> <base>`),
+  `getWorktrees`/`getWorktree`/`worktreeExists` (parsed from
+  `git worktree list --porcelain`), `removeWorktree` (needs `force` when dirty),
+  `pruneWorktrees` for stale metadata
+- Branch convention: `atlas/worker/<worker-id>/task/<task-id>` (worker-scoped,
+  so retries by different workers never collide; ids are cuid-style segments,
+  which rules out path traversal)
+
+**Safety rules:** destination must be vacant, outside the repository root, and
+never the main worktree (removal refuses main and unknown paths); all commands
+use argument arrays, never shell strings. Git is the source of truth — Atlas
+re-reads worktree state after every mutation and stores no Git state in Prisma
+(the existing `Workspace` model already has `path`/`branch` fields for the
+future adapter; no schema change was needed).
 
 ## Prerequisites
 
