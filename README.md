@@ -2,8 +2,9 @@
 
 Atlas is an AI Software Engineering Control Plane. V0.1 is a **headless orchestration
 engine** built in stages. Milestone 1 laid the project foundation; Milestone 2 added
-the **core domain model**; Milestone 3 adds the **deterministic Git worktree engine**
-for isolated worker workspaces. No orchestration yet.
+the **core domain model**; Milestone 3 added the **deterministic Git worktree engine**;
+Milestone 4 adds the **workspace service** that assigns tasks to workers with
+isolated worktrees. No scheduling or execution yet.
 
 ## Scope (V0.1 so far)
 
@@ -15,7 +16,8 @@ Included:
 - Prisma + SQLite orchestration-state database (no source code in the DB)
 - Core domain model: 13 entities, explicit state machines, deterministic invariants
 - Git worktree engine: repository inspection + isolated worktree lifecycle (`src/git/`)
-- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git)
+- Workspace service: explicit task→worker assignment with isolated worktrees (`src/workspaces/`)
+- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces)
 
 Explicitly NOT included (per AGENTS.md):
 
@@ -38,6 +40,10 @@ Explicitly NOT included (per AGENTS.md):
   `inputs` (Zod boundary DTOs), `validation` (deterministic invariants),
   `transitions` (explicit state machines), `errors` (domain errors),
   `service` (minimal create/transition/record operations).
+- `src/git/` owns Git truth and never touches Prisma.
+- `src/workspaces/` coordinates the two: `assignTaskToWorker` validates,
+  creates the worktree, then persists Workspace + links + transitions +
+  `TASK_ASSIGNED` event in one Prisma transaction.
 
 ## Core domain model (Milestone 2)
 
@@ -93,6 +99,35 @@ use argument arrays, never shell strings. Git is the source of truth — Atlas
 re-reads worktree state after every mutation and stores no Git state in Prisma
 (the existing `Workspace` model already has `path`/`branch` fields for the
 future adapter; no schema change was needed).
+
+## Workspace service (Milestone 4)
+
+**How assignment works:** `assignTaskToWorker({ taskId, workerId, repositoryId,
+workspaceRoot, base? })` performs one explicit, manual assignment — there is no
+scheduler. It validates existence and relationships (repository must belong to
+the task's project), requires task `READY` and worker `IDLE`, derives the
+deterministic path `<workspaceRoot>/<projectId>/<workerId>/<taskId>` and the
+Git module's branch `atlas/worker/<worker-id>/task/<task-id>`, creates the
+worktree, then persists the `Workspace` row, links worker↔task↔workspace,
+applies `READY→CLAIMED` / `IDLE→ASSIGNED` / `CREATING→READY` via the existing
+transition machinery, and records a `TASK_ASSIGNED` event — all in a single
+Prisma transaction. Assignment is not execution: the task stops at `CLAIMED`.
+
+**Partial failures:** Git and SQLite cannot share a transaction, so the
+worktree is created first (outside any transaction) and persistence failures
+trigger best-effort forced removal of the new worktree. The original error is
+preserved on `WorkspaceCreationError.originalError`; a failed cleanup is
+reported separately via `cleanupError` instead of replacing it. Git failures
+leave no rows behind because persistence never runs.
+
+**Idempotency:** repeating the identical request returns the existing
+assignment (`alreadyAssigned: true`) with zero side effects — no new worktree,
+row, or event. Conflicting requests (task claimed by another worker, worker
+busy, wrong states) are rejected with typed errors.
+
+**Known limitation:** cross-feature task dependencies remain rejected
+(Milestone 2 rule, unchanged); DAG/dependency logic belongs to a later
+milestone.
 
 ## Prerequisites
 
