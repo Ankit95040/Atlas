@@ -1,0 +1,21 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Atlas V0.1 foundation: orchestration state ONLY.
+// Git remains the source of truth for source code — never store source code here.
+// This minimal Project registry proves SQLite/Prisma connectivity and gives
+// future milestones (planner, DAG, workers) a stable root entity to reference.
+
+model Project {
+  id        String   @id @default(cuid())
+  name      String
+  repoPath  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
