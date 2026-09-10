@@ -5,8 +5,10 @@ engine** built in stages. Milestone 1 laid the project foundation; Milestone 2 a
 the **core domain model**; Milestone 3 added the **deterministic Git worktree engine**;
 Milestone 4 added the **workspace service**; Milestone 5 added **repository analysis
 and resource claims**; Milestone 6 added the **deterministic dependency graph and
-claim-aware scheduler**; Milestone 7 adds the **AI planner boundary** (untrusted
-proposals → deterministic validation → M6 scheduler; no execution yet).
+claim-aware scheduler**; Milestone 7 added the **AI planner boundary** (untrusted
+proposals → deterministic validation → M6 scheduler); Milestone 8 adds the
+**controlled worker runtime** (approved task → isolated worktree → provider
+execution → Git diff → claim enforcement → structured result; no merging).
 
 ## Scope (V0.1 so far)
 
@@ -25,14 +27,17 @@ Included:
   machine-readable reasons (`src/dag/`); cross-feature dependencies allowed
 - AI planner boundary: untrusted proposals → deterministic validation → M6
   scheduler (`src/planner/`); providers return data, never authority
-- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag, planner)
+- Controlled worker runtime: approved task → isolated worktree → provider
+  execution → Git diff → claim enforcement → structured result (`src/workers/`);
+  no merging
+- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag, planner, workers)
 
 Explicitly NOT included (per AGENTS.md):
 
-- Worker execution, Docker execution, AI workers
+- Docker execution, production sandboxing, production AI vendor workers
 - Web UI, React, spatial/island UI
 - Redis, queues, WebSockets, auth, multi-user
-- Semantic merge, live rebase, automatic merge to main
+- Semantic merge, live rebase, automatic merge to main, merge train
 
 ## Architecture
 
@@ -242,6 +247,32 @@ converts via `toSchedulerInput` into M6 input, so the compiler enforces that
 raw proposals cannot reach the scheduler. No persistence, no LLM SDK: tests
 use `FakePlannerProvider`; a vendor provider can implement the interface
 later. Human approval remains required before anything executes.
+
+## Controlled worker runtime (Milestone 8)
+
+**Core principle:** Atlas controls the execution boundary; the AI worker only
+implements inside it. `executeTask({ taskId, workerId, expectedBaseCommit },
+provider)` runs: approval gate (explicit `APPROVED` decision required) →
+state gate → workspace gate (DB record authoritative, main worktree rejected)
+→ base-commit gate → atomic slot acquisition (task `CLAIMED→IN_PROGRESS`,
+worker `ASSIGNED→RUNNING` in one transaction) → provider executes inside the
+assigned worktree → Git diff inspection → claim enforcement → terminal states
++ `WorkerExecutionResult`. No merging; the branch/worktree stays isolated.
+
+**Claim enforcement** (`src/workers/runtime.ts`): actual modifications (from
+`git diff`, never provider self-report) must be covered by `WRITE` claims
+under M5 segment-overlap semantics — a `WRITE src/auth/` covers
+`src/auth/login.ts`, while `WRITE src/auth/login.ts` does not cover
+`src/auth/session.ts`. Uncovered paths yield `CLAIM_VIOLATION` (worker and
+task `FAILED`, never silently completed).
+
+**Provider boundary** (`src/workers/provider.ts`): `WorkerProvider` returns
+`unknown` and receives minimum context only (ids, workspace path, title,
+claims, base commit — no secrets, no env). Strict output validation rejects
+smuggled fields; provider test self-reports are metadata, never evidence
+(no `TestRun` rows are fabricated). Tests use `FakeWorkerProvider`
+(confined file ops, optional commit). This is application-level isolation,
+not OS/container sandboxing — that hardening is future work.
 
 ## Prerequisites
 

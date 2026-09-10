@@ -11,9 +11,11 @@
 //   errors.ts     typed DomainError failures (codes stable for tests)
 //   repository.ts inspection (root/branch/commit/status) + branch management
 //   worktree.ts   isolated worktree lifecycle + worker branch naming
+//   diff.ts       read-only worktree change inspection vs a base commit
 
 export * from "./client.js";
 export * from "./types.js";
 export * from "./errors.js";
 export * from "./repository.js";
 export * from "./worktree.js";
+export * from "./diff.js";
