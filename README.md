@@ -6,9 +6,11 @@ the **core domain model**; Milestone 3 added the **deterministic Git worktree en
 Milestone 4 added the **workspace service**; Milestone 5 added **repository analysis
 and resource claims**; Milestone 6 added the **deterministic dependency graph and
 claim-aware scheduler**; Milestone 7 added the **AI planner boundary** (untrusted
-proposals → deterministic validation → M6 scheduler); Milestone 8 adds the
+proposals → deterministic validation → M6 scheduler); Milestone 8 added the
 **controlled worker runtime** (approved task → isolated worktree → provider
-execution → Git diff → claim enforcement → structured result; no merging).
+execution → Git diff → claim enforcement → structured result); Milestone 9 adds
+**verification + merge train** (Atlas-executed tests, independent verification,
+ordered integration onto a train branch — main is never merged).
 
 ## Scope (V0.1 so far)
 
@@ -30,14 +32,17 @@ Included:
 - Controlled worker runtime: approved task → isolated worktree → provider
   execution → Git diff → claim enforcement → structured result (`src/workers/`);
   no merging
-- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag, planner, workers)
+- Verification + merge train: Atlas-executed tests, independent verification,
+  and approval-gated ordered integration onto a dedicated train branch
+  (`src/verification/`); main is never merged
+- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag, planner, workers, verification)
 
 Explicitly NOT included (per AGENTS.md):
 
 - Docker execution, production sandboxing, production AI vendor workers
 - Web UI, React, spatial/island UI
 - Redis, queues, WebSockets, auth, multi-user
-- Semantic merge, live rebase, automatic merge to main, merge train
+- Semantic merge, live rebase, automatic merge to main
 
 ## Architecture
 
@@ -273,6 +278,38 @@ smuggled fields; provider test self-reports are metadata, never evidence
 (no `TestRun` rows are fabricated). Tests use `FakeWorkerProvider`
 (confined file ops, optional commit). This is application-level isolation,
 not OS/container sandboxing — that hardening is future work.
+
+## Verification + merge train (Milestone 9)
+
+**Core principle:** the merge train integrates only work Atlas itself has
+verified. Provider claims are never evidence; only Atlas-executed processes,
+Git-observed state, and explicit human approvals count.
+
+**Test execution** (`src/verification/tests.ts`): `runTests({ taskId, workdir,
+command?, timeoutMs? })` runs the repository's configured test command
+(`package.json` `scripts.test`, or an explicit argv array — never a shell
+string, never an invented default) via `execFile`, capturing command, exit
+code, stdout/stderr, and duration. Exit 0 → `PASSED`; non-zero/timeout →
+`FAILED`; abort → `CANCELLED`. Each run persists a `TestRun` row
+(`PENDING→RUNNING→terminal`, exit code plus bounded output in metadata).
+
+**Verification** (`src/verification/verify.ts`): `verifyExecution` re-derives
+everything independently — worker→task→workspace links, worktree
+registration (never main), base-commit ancestry, claim coverage of the fresh
+diff, and one cited Atlas-executed `PASSED` `TestRun` belonging to the task
+with exit code 0. Result is a structured `VERIFIED`/`REJECTED` verdict with
+per-check details, reasons, and a recorded `ANALYSIS_REPORT` artifact.
+
+**Merge train** (`src/verification/mergetrain.ts`): `runMergeTrain` requires
+an explicit `APPROVED` decision up front, then integrates items in sorted
+task-id order onto a dedicated train branch (created from the base commit in
+an Atlas-owned worktree): re-verify, require committed-clean worker trees,
+`merge --no-ff --no-commit`, abort + halt with `CONFLICT` on conflicts, run
+cumulative tests in the train worktree, abort + halt with `TESTS_FAILED` on
+failure, otherwise commit each merge and record `Commit` + `COMMIT` artifact
+rows. Worker worktrees are only read, never modified; `main` is never
+checked out, merged, or otherwise touched — the train branch awaits human
+approval for any future main-branch step.
 
 ## Prerequisites
 
