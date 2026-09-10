@@ -31,7 +31,6 @@ import {
 import { InvalidTransitionError, InvariantViolationError, NotFoundError } from "./errors.js";
 import {
   assertNoSelfDependency,
-  assertSameFeature,
   serializeMetadata,
   serializeResourceClaims,
   stripUndefined,
@@ -87,7 +86,8 @@ export async function createTaskDependency(raw: unknown, db: PrismaClient = getP
   if (prerequisite === null) {
     throw new NotFoundError("Task", input.dependsOnTaskId);
   }
-  assertSameFeature(task.featureId, prerequisite.featureId);
+  // Cross-feature dependencies are valid as of M6: the DAG spans features.
+  // Foreign-key integrity still guarantees both tasks exist.
 
   try {
     return await db.taskDependency.create({ data: stripUndefined(input) });

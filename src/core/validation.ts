@@ -42,13 +42,6 @@ export function assertNoSelfDependency(taskId: string, dependsOnTaskId: string):
   }
 }
 
-/** Dependencies are valid only within a single feature's task graph. */
-export function assertSameFeature(featureIdA: string, featureIdB: string): void {
-  if (featureIdA !== featureIdB) {
-    throw new InvariantViolationError("task dependencies must stay within the same feature");
-  }
-}
-
 /**
  * Drop undefined-valued keys before Prisma writes. Under
  * exactOptionalPropertyTypes Zod inputs carry `prop?: T | undefined` while

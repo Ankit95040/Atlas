@@ -3,8 +3,9 @@
 Atlas is an AI Software Engineering Control Plane. V0.1 is a **headless orchestration
 engine** built in stages. Milestone 1 laid the project foundation; Milestone 2 added
 the **core domain model**; Milestone 3 added the **deterministic Git worktree engine**;
-Milestone 4 added the **workspace service**; Milestone 5 adds **repository analysis
-and resource claims** for reasoning about safe parallel execution. No scheduling yet.
+Milestone 4 added the **workspace service**; Milestone 5 added **repository analysis
+and resource claims**; Milestone 6 adds the **deterministic dependency graph and
+claim-aware scheduler** (decision layer only — no execution yet).
 
 ## Scope (V0.1 so far)
 
@@ -19,12 +20,13 @@ Included:
 - Workspace service: explicit task→worker assignment with isolated worktrees (`src/workspaces/`)
 - Repository analysis + resource claims: structural resource maps and deterministic
   conflict detection (`src/analyzer/`, `src/claims/`)
-- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims)
+- Dependency graph + claim-aware scheduler: deterministic execution plans with
+  machine-readable reasons (`src/dag/`); cross-feature dependencies allowed
+- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag)
 
 Explicitly NOT included (per AGENTS.md):
 
-- Orchestration, scheduling, worker execution, Docker execution
-- AI workers, DAG execution
+- Worker execution, Docker execution, AI workers
 - Web UI, React, spatial/island UI
 - Redis, queues, WebSockets, auth, multi-user
 - Semantic merge, live rebase, automatic merge to main
@@ -62,7 +64,7 @@ Entities (all persisted via Prisma + SQLite, validated via Zod at the boundary):
 | `Repository` | Source repo pointer: local path, remote URL, default branch |
 | `Feature` | Requested change; owns tasks (`DRAFT…COMPLETED/CANCELLED`) |
 | `Task` | One executable work unit; priority + JSON resource claims (`path` + `read/write`) |
-| `TaskDependency` | Directed edge: `taskId` waits on `dependsOnTaskId`; same feature only, never self |
+| `TaskDependency` | Directed edge: `taskId` waits on `dependsOnTaskId`; cross-feature allowed since M6, never self |
 | `Worker` | AI worker record; links to one task (`IDLE…COMPLETED/FAILED/STOPPED`) |
 | `Workspace` | Isolated workspace record: path/branch; links to one worker |
 | `Artifact` | Evidence reference (patch/commit/test/build/analysis report) — metadata only |
@@ -73,7 +75,7 @@ Entities (all persisted via Prisma + SQLite, validated via Zod at the boundary):
 | `Approval` | Explicit human decision: created `PENDING`, decided once (`APPROVED/REJECTED` + actor + timestamp) |
 
 Key invariants (deterministic, tested): required fields reject empty input;
-self-dependencies and cross-feature edges rejected; duplicate edges, contracts,
+self-dependencies rejected (cross-feature edges allowed since M6); duplicate edges, contracts,
 and per-repo commit SHAs rejected; invalid state transitions rejected
 (same-state is an idempotent no-op); approvals need a target and an explicit
 decision; commit SHAs must be 7–40 hex chars.
@@ -132,9 +134,8 @@ assignment (`alreadyAssigned: true`) with zero side effects — no new worktree,
 row, or event. Conflicting requests (task claimed by another worker, worker
 busy, wrong states) are rejected with typed errors.
 
-**Known limitation:** cross-feature task dependencies remain rejected
-(Milestone 2 rule, unchanged); DAG/dependency logic belongs to a later
-milestone.
+**Resolved in M6:** cross-feature task dependencies are now allowed and the
+claim-aware scheduler plans across the resulting DAG (see below).
 
 ## Repository analysis + resource claims (Milestone 5)
 
@@ -174,6 +175,35 @@ Task A:  WRITE src/auth/login.ts      Task B:  WRITE src/dashboard/page.tsx
 Task C:  WRITE prisma/schema.prisma   Task D:  WRITE prisma/schema.prisma
 → CONFLICT (WRITE_WRITE)
 ```
+
+## Dependency graph + claim-aware scheduler (Milestone 6)
+
+**What it answers:** which tasks are blocked by dependencies, which are ready,
+which may run in parallel, which must serialize over conflicting claims, and
+how worker availability bounds it all. The output is a machine-readable
+`ExecutionPlan` — a decision layer only. Nothing executes, nothing is
+assigned; a later runtime will consume plans via the M4 assignment service.
+
+**Graph** (`src/dag/graph.ts`): `TaskGraph` stores directed `dependsOn` edges
+with sorted traversals, explicit `NotFoundError`/`InvariantViolationError`
+failures, and cycle detection with closed-loop paths (`DependencyCycleError`).
+Topological order breaks ties by smallest task id, so plans never depend on
+insertion order.
+
+**Scheduler** (`src/dag/scheduler.ts`, pure — no Prisma): `planSchedule` takes
+tasks, edges, claims, worker statuses, and `maxConcurrency`, then greedily
+packs dependency-ready tasks (`PENDING`/`READY` with every prerequisite
+`COMPLETED`) into ordered waves bounded by `min(maxConcurrency, idle workers)`,
+keeping each wave claim-conflict-free via the M5 engine. Reasons are explicit:
+`PARALLEL_ELIGIBLE`, `BLOCKED_BY_DEPENDENCY` (with the uncompleted ids),
+`TASK_NOT_READY` (with the offending status), `WORKER_UNAVAILABLE`, and
+`SERIALIZED_RESOURCE_CONFLICT` on the conflicting pairs themselves — a
+resource conflict is reported, never converted into a fake `TaskDependency`.
+
+**Loading** (`src/dag/loader.ts`): `loadSchedulerInput` resolves a seed task
+set plus its transitive prerequisites (cross-feature included) from Prisma
+into the pure input shape. **Cross-feature dependencies are valid as of M6**
+(the M2 same-feature restriction is removed; FK integrity is unchanged).
 
 ## Prerequisites
 

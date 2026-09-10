@@ -80,7 +80,7 @@ describe("domain persistence and invariants", () => {
     expect(prerequisite.dependents.map((d) => d.taskId)).toEqual([other.id]);
   });
 
-  it("rejects self-dependencies, cross-feature edges, duplicates, and unknown tasks", async () => {
+  it("rejects self-dependencies, duplicates, and unknown tasks, and allows cross-feature edges", async () => {
     const { task } = await createChain("dep-bad");
     const sibling = await service.createTask({ featureId: task.featureId, title: "Sibling" });
     track("task", sibling.id);
@@ -91,9 +91,11 @@ describe("domain persistence and invariants", () => {
     await expect(
       service.createTaskDependency({ taskId: task.id, dependsOnTaskId: task.id }),
     ).rejects.toThrow(/cannot depend on itself/);
-    await expect(
-      service.createTaskDependency({ taskId: task.id, dependsOnTaskId: outsider.id }),
-    ).rejects.toThrow(InvariantViolationError);
+    // Cross-feature dependencies are valid as of M6: the DAG spans features.
+    const crossEdge = await service.createTaskDependency({ taskId: task.id, dependsOnTaskId: outsider.id });
+    track("taskDependency", crossEdge.id);
+    expect(crossEdge.taskId).toBe(task.id);
+    expect(crossEdge.dependsOnTaskId).toBe(outsider.id);
     await expect(
       service.createTaskDependency({ taskId: "missing", dependsOnTaskId: task.id }),
     ).rejects.toThrow(NotFoundError);
