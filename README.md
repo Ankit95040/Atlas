@@ -4,8 +4,9 @@ Atlas is an AI Software Engineering Control Plane. V0.1 is a **headless orchestr
 engine** built in stages. Milestone 1 laid the project foundation; Milestone 2 added
 the **core domain model**; Milestone 3 added the **deterministic Git worktree engine**;
 Milestone 4 added the **workspace service**; Milestone 5 added **repository analysis
-and resource claims**; Milestone 6 adds the **deterministic dependency graph and
-claim-aware scheduler** (decision layer only — no execution yet).
+and resource claims**; Milestone 6 added the **deterministic dependency graph and
+claim-aware scheduler**; Milestone 7 adds the **AI planner boundary** (untrusted
+proposals → deterministic validation → M6 scheduler; no execution yet).
 
 ## Scope (V0.1 so far)
 
@@ -22,7 +23,9 @@ Included:
   conflict detection (`src/analyzer/`, `src/claims/`)
 - Dependency graph + claim-aware scheduler: deterministic execution plans with
   machine-readable reasons (`src/dag/`); cross-feature dependencies allowed
-- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag)
+- AI planner boundary: untrusted proposals → deterministic validation → M6
+  scheduler (`src/planner/`); providers return data, never authority
+- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag, planner)
 
 Explicitly NOT included (per AGENTS.md):
 
@@ -53,6 +56,11 @@ Explicitly NOT included (per AGENTS.md):
 - `src/claims/` models explicit task resource claims (`READ`/`WRITE`),
   normalizes them, and detects conflicts deterministically — the input a
   future scheduler will use to judge parallel safety.
+- `src/dag/` answers what could run now: pure `planSchedule` over tasks, edges,
+  claims, workers, and concurrency, emitting an `ExecutionPlan`.
+- `src/planner/` is the AI boundary: providers return untrusted proposals;
+  deterministic validation produces a `ValidatedPlannerPlan` convertible to M6
+  scheduler input. The planner never assigns, executes, or touches Git.
 
 ## Core domain model (Milestone 2)
 
@@ -204,6 +212,36 @@ resource conflict is reported, never converted into a fake `TaskDependency`.
 set plus its transitive prerequisites (cross-feature included) from Prisma
 into the pure input shape. **Cross-feature dependencies are valid as of M6**
 (the M2 same-feature restriction is removed; FK integrity is unchanged).
+
+## AI planner boundary (Milestone 7)
+
+**Core principle:** an AI-generated plan is never an authority. It is an
+untrusted proposal that must pass deterministic Atlas validation before it
+can influence execution. AI proposes → Atlas validates → Atlas schedules →
+human approves → workers execute later.
+
+**Contract** (`src/planner/types.ts`): serializable, strict-Zod `PlannerInput`
+(feature spec + project/repo context + optional analysis pin + existing tasks)
+and `PlannerProposal` (feature id, proposed tasks with claims, proposed
+dependencies, optional rationale/metadata). Extra fields rejected; task ids
+charset-restricted; dependency endpoints must exist in-proposal.
+
+**Validation** (`src/planner/validator.ts`): `validatePlannerProposal` runs
+Zod shape checks, then M5 claim normalization (`InvalidResourceClaimError`
+on bad paths/modes), then M6 `TaskGraph` cycle detection
+(`DependencyCycleError`), then optionally M5 resource-existence checks
+(`WRITE` may name future files, `READ` must match the analysis). Resource
+conflicts stay conflicts — they are never rewritten as dependencies.
+
+**Trust boundary** (`src/planner/provider.ts`, `planner.ts`): `PlannerProvider`
+returns `unknown`, never authority; `runPlanner` validates input, calls the
+provider, validates output — and does nothing else (no assignment,
+worktrees, Git, DB writes, or execution). Only `ValidatedPlannerPlan`
+(discriminant + normalized contents, constructible solely by validation)
+converts via `toSchedulerInput` into M6 input, so the compiler enforces that
+raw proposals cannot reach the scheduler. No persistence, no LLM SDK: tests
+use `FakePlannerProvider`; a vendor provider can implement the interface
+later. Human approval remains required before anything executes.
 
 ## Prerequisites
 
