@@ -298,6 +298,33 @@ describe("merge train", () => {
     expect(await db.commit.count({ where: { branch: result.trainBranch } })).toBe(0);
   });
 
+  it("halts when the worker branch has no changes over the base instead of crashing on commit", async () => {
+    // A worker can finish successfully while its registered branch contains
+    // no commit over the train base (e.g. a real agent that exited 0 without
+    // committing). The merge is then a silent no-op ("Already up to date")
+    // and a bare `git commit` would explode with "nothing to commit".
+    const repoDir = await initTrainRepo(PASS_CHECK);
+    const base = await getCurrentCommit(repoDir);
+    const { repository, feature } = await setupTrainProject("empty", repoDir);
+    const item = await setupTrainItem("empty-a", repoDir, repository.id, feature.id, [{ resource: "src/a.txt", access: "WRITE" }], {}, false);
+    const approvalId = await approveTrain(feature.id);
+    expect(item.head).toBe(base);
+
+    const result = await runMergeTrain(await trainInput("empty", repository.id, base, approvalId, [item]), db);
+    await trackTrainRecords(item.taskId);
+
+    expect(result.status).toBe("HALTED");
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.status).toBe("MERGE_FAILED");
+    expect(result.items[0]?.reason ?? "").toMatch(/no changes over .*base|nothing to integrate/i);
+    expect(result.haltReason ?? "").toMatch(/no changes over .*base|nothing to integrate/i);
+    expect(result.finalCommit).toBe(base);
+    expect(await db.commit.count({ where: { branch: result.trainBranch } })).toBe(0);
+    expect(await getCurrentCommit(repoDir)).toBe(base);
+    expect(await isClean(repoDir)).toBe(true);
+    expect(await getCurrentCommit(item.workspacePath)).toBe(item.head);
+  });
+
   it("orders items deterministically regardless of input order", async () => {
     const repoDir = await initTrainRepo(PASS_CHECK);
     const base = await getCurrentCommit(repoDir);

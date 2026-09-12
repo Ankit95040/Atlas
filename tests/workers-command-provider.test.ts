@@ -182,6 +182,28 @@ describe("command worker provider", () => {
     await expect(readFile(outside, "utf8")).resolves.toBe("evil\n");
   }, 120000);
 
+  it("delivers stdin EOF so stdin-reading children exit before the timeout", async () => {
+    // Regression: execFile leaves child stdin open with no writer, so a
+    // stdin-reading worker (e.g. OpenCode) would wait until timeout. The
+    // provider ends stdin up front; EOF must arrive and the marker must be
+    // captured far inside the timeout budget.
+    const dir = await makeTempDir();
+    const startedAt = Date.now();
+    const output = (await new CommandWorkerProvider({
+      command: [
+        process.execPath,
+        "-e",
+        "process.stdin.resume(); process.stdin.on('end', () => console.log('ATLAS-STDIN-EOF'));",
+      ],
+      timeoutMs: 15000,
+    }).execute(providerInput(dir))) as { summary: string; notes?: string };
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(output.summary).toMatch(/exit 0$/);
+    expect(output.notes ?? "").toContain("ATLAS-STDIN-EOF");
+    expect(elapsedMs).toBeLessThan(15000);
+  }, 60000);
+
   it("forwards no host secrets by default; allowlisted vars pass through", async () => {
     process.env["ATLAS_M11_TEST_SECRET"] = "topsecret-secret";
     process.env["ATLAS_M11_TEST_PUBLIC"] = "public-value";

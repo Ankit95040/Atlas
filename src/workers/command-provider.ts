@@ -56,13 +56,22 @@ interface ObservedCommand {
 
 function runCommand(executable: string, args: string[], cwd: string, timeoutMs: number, env: Record<string, string>): Promise<ObservedCommand> {
   return new Promise((resolve, reject) => {
-    execFile(executable, args, { cwd, timeout: timeoutMs, maxBuffer: EXEC_MAX_BUFFER, env }, (error, stdout, stderr) => {
+    const child = execFile(executable, args, { cwd, timeout: timeoutMs, maxBuffer: EXEC_MAX_BUFFER, env }, (error, stdout, stderr) => {
       if (error !== null) {
         reject(error);
         return;
       }
       resolve({ stdout: typeof stdout === "string" ? stdout : "", stderr: typeof stderr === "string" ? stderr : "" });
     });
+    // execFile leaves child stdin as an open pipe with no writer: a child
+    // that reads stdin would wait for EOF until the timeout kills it.
+    // Ending stdin up front delivers EOF immediately without affecting
+    // stdout/stderr capture, timeout, or environment handling.
+    try {
+      child.stdin?.end();
+    } catch {
+      // Best effort: a child without piped stdin has nothing to close.
+    }
   });
 }
 

@@ -32,6 +32,16 @@ async function unmergedPaths(trainPath: string): Promise<string[]> {
     .sort();
 }
 
+/** Paths staged by a merge. Empty after a silent no-op merge ("Already up to date"). */
+async function stagedPaths(trainPath: string): Promise<string[]> {
+  const result = await runGit(["diff", "--cached", "--name-only"], { cwd: trainPath });
+  return result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .sort();
+}
+
 async function abortMerge(trainPath: string): Promise<void> {
   try {
     await runGit(["merge", "--abort"], { cwd: trainPath });
@@ -197,6 +207,22 @@ export async function runMergeTrain(
     }
 
     let testRunId: string;
+    // A merge that stages nothing is a silent no-op: the worker branch is
+    // already reachable from the train head ("Already up to date"), so there
+    // is no MERGE_HEAD and a bare `git commit` below would explode with
+    // "nothing to commit". A worker that finished without committing anything
+    // must halt truthfully here instead of crashing there.
+    if ((await stagedPaths(worktree.path)).length === 0) {
+      await abortMerge(worktree.path);
+      integrated.push({
+        taskId: item.taskId,
+        workerId: item.workerId,
+        status: "MERGE_FAILED",
+        reason: `worker branch ${workerInfo.branch} contains no changes over the integration base; nothing to integrate`,
+      });
+      haltReason = `task ${item.taskId}: worker branch contains no changes over the integration base`;
+      break;
+    }
     try {
       const testResult = await runTests(
         {
