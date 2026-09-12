@@ -463,6 +463,31 @@ orchestrator attaches it as `WaveLoopResult.triage` on `HALTED` trains only —
 a triage failure degrades to `null` and can never turn a merge failure into
 success.
 
+## Real-agent benchmark (Milestone 14, experimental)
+
+**Scope:** a controlled orchestration comparison with the coding agent held
+constant (`src/benchmark/real/`, additive — the M10 synthetic benchmark is
+untouched and separate). It answers whether Atlas's orchestration decisions
+improve reliable parallel development, never which agent is better.
+
+**Experiment:** same repository, base commit, human-authored decomposition,
+claims, prompts, agent, and verification bar across `SINGLE_AGENT` (union
+prompt, one worker), `DUMB_PARALLEL` (same tasks, concurrent, unscheduled),
+and `ATLAS` (the shipped M11 wave loop). One shared prompt renderer feeds
+every arm identical bytes, so prompt quality cannot explain a gap; six small
+synthetic multi-file workloads with real `node:test` suites cover
+independent, shared-resource, chain, mixed, false-parallelism, and
+order-sensitive integration work.
+
+**Outcomes:** SUCCESS requires every intended task completed, verified,
+non-empty, and integrated — success rate is the primary metric, median
+successful wall-clock the secondary; individual runs are always kept,
+medians never fabricated from zero successes. Usage/cost is reported only
+when the agent exposes it (the M8/M11 boundary drops provider stdout, so it
+is honestly `null`, never estimated). Semantic correctness is not
+automatically measured. Real-agent results are experimental evidence about
+orchestration, not productivity claims.
+
 ## Prerequisites
 
 - Node.js >= 20
