@@ -1,0 +1,209 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import { ZodError } from "zod";
+import { getPrismaClient } from "../src/db/client.js";
+import { getCurrentCommit } from "../src/git/index.js";
+import {
+  createApproval,
+  createFeature,
+  createProject,
+  createRepository,
+  createTask,
+  createWorker,
+  decideApproval,
+  transitionTask,
+} from "../src/core/service.js";
+import { createTaskClaims } from "../src/claims/index.js";
+import { assignTaskToWorker } from "../src/workspaces/index.js";
+import { CommandWorkerProvider, executeTask, type WorkerExecutionInput } from "../src/workers/index.js";
+import { track, uniqueName } from "./domain-helpers.js";
+import { initTempRepo, makeTempDir } from "./git-helpers.js";
+
+const db = getPrismaClient();
+const AGENT = fileURLToPath(new URL("./fixtures/script-agent.mjs", import.meta.url));
+
+interface TaskSetup {
+  readonly repoDir: string;
+  readonly baseCommit: string;
+  readonly taskId: string;
+  readonly workerId: string;
+  readonly repositoryId: string;
+  readonly scratchRoot: string;
+}
+
+async function setupTask(claims: ReadonlyArray<{ resource: string; access: "READ" | "WRITE" }>): Promise<TaskSetup> {
+  const repoDir = await initTempRepo();
+  const project = await createProject({ name: uniqueName("m11-prov"), description: "command provider test" }, db);
+  track("project", project.id);
+  const repository = await createRepository({ projectId: project.id, name: "main", localPath: repoDir }, db);
+  track("repository", repository.id);
+  const feature = await createFeature({ projectId: project.id, title: "provider feature" }, db);
+  track("feature", feature.id);
+  const task = await createTask({ featureId: feature.id, title: "provider task" }, db);
+  track("task", task.id);
+  await transitionTask(task.id, "READY", db);
+  await createTaskClaims(
+    { taskId: task.id, claims: claims.map((claim) => ({ resource: claim.resource, access: claim.access })) },
+    db,
+  );
+  const worker = await createWorker({}, db);
+  track("worker", worker.id);
+  const approval = await createApproval({ taskId: task.id }, db);
+  track("approval", approval.id);
+  await decideApproval(approval.id, { decision: "APPROVED", actor: "m11-provider-test" }, db);
+  return {
+    repoDir,
+    baseCommit: await getCurrentCommit(repoDir),
+    taskId: task.id,
+    workerId: worker.id,
+    repositoryId: repository.id,
+    scratchRoot: await makeTempDir(),
+  };
+}
+
+async function runAgent(setup: TaskSetup, agentArgs: string[], providerOptions?: { timeoutMs?: number; envAllowlist?: string[] }) {
+  const assignment = await assignTaskToWorker(
+    {
+      taskId: setup.taskId,
+      workerId: setup.workerId,
+      repositoryId: setup.repositoryId,
+      workspaceRoot: join(setup.scratchRoot, "ws"),
+    },
+    db,
+  );
+  track("workspace", assignment.workspace.id);
+  const provider = new CommandWorkerProvider({
+    command: [process.execPath, AGENT, ...agentArgs],
+    ...(providerOptions?.timeoutMs !== undefined ? { timeoutMs: providerOptions.timeoutMs } : {}),
+    ...(providerOptions?.envAllowlist !== undefined ? { envAllowlist: providerOptions.envAllowlist } : {}),
+  });
+  const execution = await executeTask(
+    { taskId: setup.taskId, workerId: setup.workerId, expectedBaseCommit: setup.baseCommit },
+    provider,
+    db,
+  );
+  // Track runtime-created rows so shared-DB cleanup deletes children first.
+  for (const row of await db.event.findMany({ where: { taskId: setup.taskId } })) track("event", row.id);
+  for (const row of await db.artifact.findMany({ where: { taskId: setup.taskId } })) track("artifact", row.id);
+  return { assignment, execution };
+}
+
+function providerInput(workspacePath: string): WorkerExecutionInput {
+  return {
+    taskId: "task-probe",
+    workerId: "worker-probe",
+    workspacePath,
+    taskTitle: "probe",
+    resourceClaims: [],
+    repositoryCommit: "abc1234",
+    relevantContext: { branch: null, featureId: "feature-probe" },
+  };
+}
+
+describe("command worker provider", () => {
+  it("completes a successful subprocess modification observed from Git", async () => {
+    const setup = await setupTask([{ resource: "src/out.txt", access: "WRITE" }]);
+    const { execution } = await runAgent(setup, ["--write", "src/out.txt=hello\n", "--commit", "agent work"]);
+
+    expect(execution.status).toBe("COMPLETED");
+    expect(execution.changedResources).toEqual([{ path: "src/out.txt", change: "ADDED" }]);
+    expect(execution.undeclaredResources).toEqual([]);
+    expect(execution.providerSummary).toMatch(/^command-worker: .* exit 0$/);
+  }, 60000);
+
+  it("completes a no-op subprocess run with no changes", async () => {
+    const setup = await setupTask([{ resource: "src/future.txt", access: "WRITE" }]);
+    const { execution } = await runAgent(setup, []);
+
+    expect(execution.status).toBe("COMPLETED");
+    expect(execution.changedResources).toEqual([]);
+    expect(execution.undeclaredResources).toEqual([]);
+  }, 60000);
+
+  it("flags a forbidden modification as CLAIM_VIOLATION, never success", async () => {
+    const setup = await setupTask([{ resource: "src/allowed.txt", access: "WRITE" }]);
+    const { execution } = await runAgent(setup, ["--write", "src/forbidden.txt=nope\n", "--commit", "bad work"]);
+
+    expect(execution.status).toBe("CLAIM_VIOLATION");
+    expect(execution.undeclaredResources).toEqual(["src/forbidden.txt"]);
+  }, 60000);
+
+  it("fails a runaway subprocess on timeout without hanging the suite", async () => {
+    const setup = await setupTask([{ resource: "src/out.txt", access: "WRITE" }]);
+    const { execution } = await runAgent(setup, ["--sleep", "15000", "--write", "src/out.txt=late\n"], { timeoutMs: 1000 });
+
+    expect(execution.status).toBe("FAILED");
+    expect(execution.error ?? "").toContain("command-worker");
+  }, 60000);
+
+  it("maps a non-zero command exit to a structured failure", async () => {
+    const setup = await setupTask([{ resource: "src/out.txt", access: "WRITE" }]);
+    const { execution } = await runAgent(setup, ["--write", "src/out.txt=partial\n", "--fail", "boom-marker"]);
+
+    expect(execution.status).toBe("FAILED");
+    expect(execution.error ?? "").toContain("boom-marker");
+  }, 60000);
+
+  it("ignores garbage stdout: child output is never authority", async () => {
+    const setup = await setupTask([{ resource: "src/ok.txt", access: "WRITE" }]);
+    const { execution } = await runAgent(setup, ["--garbage", "--write", "src/ok.txt=fine\n", "--commit", "ok work"]);
+
+    expect(execution.status).toBe("COMPLETED");
+    expect(execution.undeclaredResources).toEqual([]);
+    // The summary is Atlas-built from the argv (whitespace-flattened);
+    // unstructured child stdout never leaks into it as content.
+    expect(execution.providerSummary ?? "").not.toContain("THIS IS NOT A PROVIDER RESULT");
+    expect(execution.providerSummary).toMatch(/exit 0$/);
+  }, 60000);
+
+  it("confines work to the assigned workspace and rejects workspace overrides", async () => {
+    // Config cannot name a workspace: strict schema rejects the key.
+    expect(() => new CommandWorkerProvider({ command: ["node"], workspacePath: "/elsewhere" })).toThrow(ZodError);
+    expect(() => new CommandWorkerProvider({ command: [] })).toThrow(ZodError);
+
+    // Relative writes land inside the Atlas-assigned worktree (cwd proof).
+    const setup = await setupTask([{ resource: "src/inside.txt", access: "WRITE" }]);
+    const { assignment, execution } = await runAgent(setup, ["--write", "src/inside.txt=in\n", "--commit", "in work"]);
+
+    expect(execution.status).toBe("COMPLETED");
+    await expect(readFile(join(assignment.workspace.path, "src/inside.txt"), "utf8")).resolves.toBe("in\n");
+
+    // An absolute-path write outside the workspace is invisible to Atlas
+    // claim enforcement (Git diff is worktree-scoped). This documents the
+    // M11 non-sandbox boundary: process isolation, not hostile-code isolation.
+    const outside = join(setup.scratchRoot, "outside.txt");
+    const escape = await setupTask([{ resource: "src/nowhere.txt", access: "WRITE" }]);
+    const escaped = await runAgent(escape, ["--write-absolute", `${outside}=evil\n`]);
+
+    expect(escaped.execution.status).toBe("COMPLETED");
+    expect(escaped.execution.changedResources).toEqual([]);
+    await expect(readFile(outside, "utf8")).resolves.toBe("evil\n");
+  }, 120000);
+
+  it("forwards no host secrets by default; allowlisted vars pass through", async () => {
+    process.env["ATLAS_M11_TEST_SECRET"] = "topsecret-secret";
+    process.env["ATLAS_M11_TEST_PUBLIC"] = "public-value";
+    try {
+      const dir = await makeTempDir();
+      const probe = (envAllowlist?: string[]): Promise<unknown> =>
+        new CommandWorkerProvider({
+          command: [process.execPath, AGENT, "--print-env", "ATLAS_M11_TEST_SECRET", "--print-env", "ATLAS_M11_TEST_PUBLIC"],
+          ...(envAllowlist !== undefined ? { envAllowlist } : {}),
+        }).execute(providerInput(dir));
+
+      const denied = (await probe()) as { summary: string; notes?: string };
+      expect(denied.notes ?? "").toContain("ATLAS_M11_TEST_SECRET=<unset>");
+      expect(denied.notes ?? "").toContain("ATLAS_M11_TEST_PUBLIC=<unset>");
+      expect(denied.notes ?? "").not.toContain("topsecret-secret");
+
+      const allowed = (await probe(["ATLAS_M11_TEST_PUBLIC"])) as { summary: string; notes?: string };
+      expect(allowed.notes ?? "").toContain("ATLAS_M11_TEST_PUBLIC=public-value");
+      expect(allowed.notes ?? "").not.toContain("topsecret-secret");
+    } finally {
+      delete process.env["ATLAS_M11_TEST_SECRET"];
+      delete process.env["ATLAS_M11_TEST_PUBLIC"];
+    }
+  }, 60000);
+});

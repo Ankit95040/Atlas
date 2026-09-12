@@ -10,9 +10,13 @@
 //               schema, WorkerExecutionResult + status codes
 //   provider.ts WorkerProvider (returns unknown, never authority) +
 //               FakeWorkerProvider (confined test file ops, optional commit)
+//   command-provider.ts CommandWorkerProvider (M11: real subprocess via
+//               execFile argv, cwd always the assigned workspace, bounded
+//               notes, minimal env — process isolation, not a sandbox)
 //   runtime.ts  executeTask: gates → atomic slot → provider → diff → enforce
 //   ../git/diff.ts (M3 engine extension): read-only worktree change inspection
 
 export * from "./types.js";
 export * from "./provider.js";
+export * from "./command-provider.js";
 export * from "./runtime.js";

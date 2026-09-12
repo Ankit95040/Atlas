@@ -11,9 +11,13 @@ proposals → deterministic validation → M6 scheduler); Milestone 8 added the
 execution → Git diff → claim enforcement → structured result); Milestone 9 added
 **verification + merge train** (Atlas-executed tests, independent verification,
 ordered integration onto a train branch — main is never merged); Milestone 10
-adds a **reproducible benchmark harness** comparing `SINGLE_AGENT`,
+added a **reproducible benchmark harness** comparing `SINGLE_AGENT`,
 `DUMB_PARALLEL`, and `ATLAS` strategies with fake providers only — orchestration
-evidence, never real coding-agent productivity claims.
+evidence, never real coding-agent productivity claims; Milestone 11 adds
+**real worker execution** (`CommandWorkerProvider`: argv subprocess in the
+assigned worktree, no shell, bounded output, minimal env) plus a thin
+**feature wave-run loop** (`src/orchestrator/`) composing the M4/M6/M8/M9
+services — schedule → execute → test → verify → COMPLETED → re-plan → train.
 
 ## Scope (V0.1 so far)
 
@@ -38,7 +42,12 @@ Included:
 - Verification + merge train: Atlas-executed tests, independent verification,
   and approval-gated ordered integration onto a dedicated train branch
   (`src/verification/`); main is never merged
-- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag, planner, workers, verification, benchmark)
+- Real worker execution: subprocess-based provider with argv-only commands,
+  workspace-bound cwd, timeouts, and minimal env (`src/workers/command-provider.ts`)
+- Feature wave-run loop: thin orchestration composing scheduler, assignment,
+  runtime, verification, and merge train with per-round re-planning
+  (`src/orchestrator/`); no second scheduler, no rebase
+- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag, planner, workers, command-provider, verification, benchmark, orchestrator, cli)
 
 Explicitly NOT included (per AGENTS.md):
 
@@ -357,6 +366,74 @@ attempted — the train halts on the first conflict and records it as evidence.
 This is intentional V0.1 behavior: rebase, re-plan-after-wave, and
 conflict-aware rescheduling are explicitly out of scope (see AGENTS.md).
 
+## Real worker execution + wave-run loop (Milestone 11)
+
+**Thesis under test:** Atlas can take real tasks, isolate them into
+worktrees, execute a real worker *process*, observe the resulting Git diff,
+enforce resource claims, run tests, verify the execution, and integrate the
+result through the existing merge train — without changing the M8 trust
+boundary.
+
+**CommandWorkerProvider** (`src/workers/command-provider.ts`): implements the
+unchanged M8 `WorkerProvider` interface via `node:child_process` `execFile`
+(argv array, never a shell). `cwd` is always the Atlas-assigned
+`workspacePath` — the config schema is strict and cannot name a workspace.
+Timeouts kill and fail the run; stdout/stderr are captured into bounded
+`notes` (informational only, never authority — the M8 Git diff stays the
+source of truth); non-zero exits throw, which the runtime maps to structured
+`FAILED` exactly like any throwing provider. The child receives only `PATH`
+plus explicitly allowlisted variable names (default: none) — secrets are
+never forwarded because provider input carries none by construction.
+
+**Wave-run loop** (`src/orchestrator/run-loop.ts`): `runFeatureWaveLoop`
+composes existing services and duplicates none — `loadSchedulerInput` +
+`planSchedule` (M6) → per-task approval → `assignTaskToWorker` (M4) →
+`executeTask` (M8) → `runTests` + `verifyExecution` (M9) → `VERIFIED` tasks
+transition to `COMPLETED` → reload fresh state and re-plan → repeat → one
+approval-gated `runMergeTrain` in wave order. Per-task operational failures
+(`CLAIM_VIOLATION`, `FAILED`, failed tests, `REJECTED`) live in `outcomes`;
+only genuine loop/config failures throw (`OrchestratorError`). Re-planning
+schedules remaining work again — it never rebases or recreates branches.
+
+**Deterministic script-agent** (`tests/fixtures/script-agent.mjs`, tests
+only): hermetic Node script proving the subprocess boundary without network
+or LLMs — write/delete/sleep/fail/garbage/absolute-path/env-print/commit
+modes covering success, no-op, violation, timeout, failure, stdout
+indifference, confinement, and env filtering.
+
+**Not a sandbox.** M11 is process/worktree isolation: a hostile child could
+still touch the wider filesystem (an absolute-path write is simply invisible
+to worktree-scoped claim enforcement — covered by a test documenting exactly
+this). Docker/microVM sandboxing remains future work and is not claimed.
+
+## Developer CLI workflow (Milestone 12)
+
+**Scope:** `atlas` is a thin adapter over the M1–M11 engine — three commands,
+no duplicated domain logic. `atlas doctor` is unchanged.
+
+**`atlas plan --feature <id> --proposal <file>`** reads an untrusted proposal
+JSON file, validates it deterministically (M7, proposal `featureId` must
+match `--feature`), persists tasks/claims/dependencies once (re-runs reuse
+the existing approval via a `sha256` binding — never duplicate tasks), and
+prints a scheduler preview computed by the real M6 scheduler with
+hypothetical workers (display only; nothing is created or executed). It
+creates a `PENDING` plan approval (`context: m12-plan`); `--approve --actor
+<name>` re-validates the file and decides it via the existing Approval API.
+Approving a changed file is refused.
+
+**`atlas run --feature <id> --repository <id> --plan-approval <id> --actor
+<name> --agent <exe> [--agent-arg …] --approve-merge`** executes nothing
+until authorized: the plan approval must already be `APPROVED`, and without
+`--approve-merge` the command exits before any work starts. With it, the CLI
+creates a `PENDING` merge approval bound to the plan approval and decides it
+`APPROVED` — the flag is only the mechanism invoking the decision API; the
+persisted row is the record. It then calls `runFeatureWaveLoop` with a
+`CommandWorkerProvider` factory (argv-only, no shell). Base defaults to
+repository HEAD; workspaces/train default under `.atlas/`. Exit 0 only on a
+fully verified + integrated run; exit 2 reports truthful-but-unfavorable
+outcomes (halted train, failures, violations). `--json` prints the same
+result objects machine-readably on either command.
+
 ## Prerequisites
 
 - Node.js >= 20
@@ -378,6 +455,8 @@ pnpm build
 ```sh
 pnpm atlas -- --help
 pnpm atlas -- doctor
+pnpm atlas -- plan --feature <featureId> --proposal proposal.json [--approve --actor <name>]
+pnpm atlas -- run --feature <featureId> --repository <repoId> --plan-approval <approvalId> --actor <name> --agent <exe> [--agent-arg <arg> ...] --approve-merge
 # after `pnpm build`, the local bin also works:
 ./node_modules/.bin/atlas --help
 ./node_modules/.bin/atlas doctor
