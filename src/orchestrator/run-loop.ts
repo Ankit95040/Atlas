@@ -16,6 +16,7 @@ import {
 } from "../verification/index.js";
 import { OrchestratorError } from "./errors.js";
 import { RunFeatureWaveLoopInputSchema, type RunFeatureWaveLoopInput } from "./types.js";
+import { triageIntegrationHalt, type TriageReport } from "../triage/index.js";
 
 export interface WaveLoopDependencies {
   /**
@@ -49,6 +50,12 @@ export interface WaveLoopResult {
   readonly outcomes: TaskOutcome[];
   /** Null when nothing verified (nothing eligible for integration). */
   readonly train: MergeTrainResult | null;
+  /**
+   * Triage report when the train HALTED, null otherwise. Read-only M13
+   * evidence attached by a thin post-halt hook — the loop itself contains
+   * no classification logic, and triage never alters the train result.
+   */
+  readonly triage: TriageReport | null;
 }
 
 /**
@@ -165,7 +172,7 @@ export async function runFeatureWaveLoop(
   const verified = outcomes.filter((outcome) => outcome.verification?.verdict === "VERIFIED" && outcome.testRun !== null);
   if (verified.length === 0) {
     await trackTaskEvidence(db, track, outcomes.map((outcome) => outcome.taskId));
-    return { featureId: feature.id, repositoryId: repository.id, baseCommit: input.baseCommit, waves, outcomes, train: null };
+    return { featureId: feature.id, repositoryId: repository.id, baseCommit: input.baseCommit, waves, outcomes, train: null, triage: null };
   }
 
   const trainApproval = await createApproval({ featureId: feature.id }, db);
@@ -199,7 +206,35 @@ export async function runFeatureWaveLoop(
     db,
   );
   await trackTaskEvidence(db, track, outcomes.map((outcome) => outcome.taskId));
-  return { featureId: feature.id, repositoryId: repository.id, baseCommit: input.baseCommit, waves, outcomes, train };
+  // Thin M13 post-halt hook: attach read-only triage evidence. Triage can
+  // only observe — a triage failure degrades to null and never alters the
+  // HALTED train result.
+  let triage: TriageReport | null = null;
+  if (train.status === "HALTED") {
+    try {
+      triage = await triageIntegrationHalt(
+        {
+          repositoryId: repository.id,
+          baseCommit: input.baseCommit,
+          finalCommit: train.finalCommit,
+          items: train.items.map((item) => ({
+            taskId: item.taskId,
+            workerId: item.workerId,
+            status: item.status,
+            ...(item.testRunId !== undefined ? { testRunId: item.testRunId } : {}),
+            ...(item.mergeCommit !== undefined ? { mergeCommit: item.mergeCommit } : {}),
+            ...(item.reason !== undefined ? { reason: item.reason } : {}),
+          })),
+          scratchParent: join(input.workspaceRoot, "triage"),
+        },
+        db,
+      );
+      track("artifact", triage.evidenceRefs.artifactId);
+    } catch {
+      triage = null;
+    }
+  }
+  return { featureId: feature.id, repositoryId: repository.id, baseCommit: input.baseCommit, waves, outcomes, train, triage };
 }
 
 /**

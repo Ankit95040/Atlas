@@ -47,7 +47,7 @@ Included:
 - Feature wave-run loop: thin orchestration composing scheduler, assignment,
   runtime, verification, and merge train with per-round re-planning
   (`src/orchestrator/`); no second scheduler, no rebase
-- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag, planner, workers, command-provider, verification, benchmark, orchestrator, cli)
+- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag, planner, workers, command-provider, verification, benchmark, orchestrator, cli, triage)
 
 Explicitly NOT included (per AGENTS.md):
 
@@ -433,6 +433,35 @@ repository HEAD; workspaces/train default under `.atlas/`. Exit 0 only on a
 fully verified + integrated run; exit 2 reports truthful-but-unfavorable
 outcomes (halted train, failures, violations). `--json` prints the same
 result objects machine-readably on either command.
+
+## Integration triage (Milestone 13)
+
+**Scope:** a read-only deterministic evidence layer over halted merge trains
+(`src/triage/`). When sibling worker branches collide, triage turns the halt
+into an actionable report instead of a bare `HALTED` status — without
+rebasing, resolving, or modifying anything. The human remains the final
+authority.
+
+**How it works:** `triageIntegrationHalt` replays the halted merge in a
+throwaway worktree (created at the train's halt commit, always removed in
+`finally` — main, train, and worker state are never touched) to get
+Git-confirmed unmerged paths; attributes each file to earlier tasks via
+branch diffs through worker → workspace records (never titles — unprovable
+ownership is reported unknown); compares declared claims with the existing
+M5 engine; reads dependency direction through the existing M6 graph; and
+flags semantic risk with explicit `notProven: true` markers.
+
+**Classifications** (combinable, evidence-backed only): `CLAIM_CONFLICT`
+(declared claims overlap), `GIT_CONFLICT` (Git reports unmerged paths),
+`DEPENDENCY_ORDERING` (an edge exists between the colliding tasks),
+`SEMANTIC_RISK` (review signal, semantics never claimed), `UNKNOWN`
+(insufficient evidence — never invented). Recommended actions are a fixed
+advisory vocabulary (review files, revise claims, reorder, replan); triage
+executes none of them. The report is JSON-serializable and recorded as one
+`ANALYSIS_REPORT` artifact; no Prisma changes, no new dependencies. The
+orchestrator attaches it as `WaveLoopResult.triage` on `HALTED` trains only —
+a triage failure degrades to `null` and can never turn a merge failure into
+success.
 
 ## Prerequisites
 
