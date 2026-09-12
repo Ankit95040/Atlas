@@ -108,7 +108,14 @@ export async function runMergeTrain(
   }
   const root = await validateRepository(repository.localPath);
 
-  const items = [...input.items].sort((a, b) => (a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0));
+  const items = [...input.items].sort((a, b) => {
+    const seqA = a.sequence ?? Number.POSITIVE_INFINITY;
+    const seqB = b.sequence ?? Number.POSITIVE_INFINITY;
+    if (seqA !== seqB) {
+      return seqA - seqB;
+    }
+    return a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0;
+  });
   const worktree = await createWorktree({
     repoPath: root,
     path: input.trainPath,

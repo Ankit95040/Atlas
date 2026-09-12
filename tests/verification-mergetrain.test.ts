@@ -360,6 +360,76 @@ describe("merge train", () => {
   });
 });
 
+async function mergeParents(repoDir: string, sha: string): Promise<string[]> {
+  const result = await runGit(["log", "--format=%P", "-n", "1", sha], { cwd: repoDir });
+  return result.stdout.trim().split(/\s+/).filter((parent) => parent.length > 0);
+}
+
+describe("merge train sequencing", () => {
+  it("integrates in explicit sequence order instead of taskId order", async () => {
+    const repoDir = await initTrainRepo(PASS_CHECK);
+    const base = await getCurrentCommit(repoDir);
+    const { repository, feature } = await setupTrainProject("seq", repoDir);
+    const itemA = await setupTrainItem("seq-a", repoDir, repository.id, feature.id, [{ resource: "src/a.txt", access: "WRITE" }], { "src/a.txt": "aaa\n" }, true);
+    const itemB = await setupTrainItem("seq-b", repoDir, repository.id, feature.id, [{ resource: "src/b.txt", access: "WRITE" }], { "src/b.txt": "bbb\n" }, true);
+    const approvalId = await approveTrain(feature.id);
+
+    // Force the opposite of taskId order: whichever sorts first gets sequence 1.
+    const [firstId, secondId] = [itemA.taskId, itemB.taskId].sort();
+    const first = firstId === itemA.taskId ? itemA : itemB;
+    const second = secondId === itemA.taskId ? itemA : itemB;
+    const input = await trainInput("seq", repository.id, base, approvalId, [first, second]);
+    const sequenced = {
+      ...input,
+      items: (input.items as Array<Record<string, unknown>>).map((item) => ({
+        ...item,
+        sequence: item.taskId === second.taskId ? 0 : 1,
+      })),
+    };
+    const result = await runMergeTrain(sequenced, db);
+    for (const item of [itemA, itemB]) await trackTrainRecords(item.taskId);
+
+    expect(result.status).toBe("COMPLETED");
+    const byTask = new Map(result.items.map((item) => [item.taskId, item]));
+    const firstMerge = byTask.get(second.taskId)?.mergeCommit;
+    const secondMerge = byTask.get(first.taskId)?.mergeCommit;
+    expect(firstMerge).toMatch(/^[0-9a-f]{40}$/);
+    expect(secondMerge).toMatch(/^[0-9a-f]{40}$/);
+    // Processing order follows sequence: second's merge is the parent of first's.
+    expect(await mergeParents(repoDir, secondMerge ?? "")).toContain(firstMerge ?? "");
+  });
+
+  it("preserves legacy taskId order when sequence is absent", async () => {
+    const repoDir = await initTrainRepo(PASS_CHECK);
+    const base = await getCurrentCommit(repoDir);
+    const { repository, feature } = await setupTrainProject("legacy", repoDir);
+    const itemA = await setupTrainItem("legacy-a", repoDir, repository.id, feature.id, [{ resource: "src/a.txt", access: "WRITE" }], { "src/a.txt": "aaa\n" }, true);
+    const itemB = await setupTrainItem("legacy-b", repoDir, repository.id, feature.id, [{ resource: "src/b.txt", access: "WRITE" }], { "src/b.txt": "bbb\n" }, true);
+    const approvalId = await approveTrain(feature.id);
+
+    // Pass items in reverse taskId order with no sequence fields at all.
+    const input = await trainInput("legacy", repository.id, base, approvalId, [itemA, itemB]);
+    const [sortedFirst, sortedSecond] = [itemA.taskId, itemB.taskId].sort();
+    const reversed = {
+      ...input,
+      items: [...input.items].reverse(),
+    };
+    for (const item of reversed.items) {
+      expect("sequence" in item).toBe(false);
+    }
+    const result = await runMergeTrain(reversed, db);
+    for (const item of [itemA, itemB]) await trackTrainRecords(item.taskId);
+
+    expect(result.status).toBe("COMPLETED");
+    const byTask = new Map(result.items.map((item) => [item.taskId, item]));
+    const firstMerge = sortedFirst === undefined ? undefined : byTask.get(sortedFirst)?.mergeCommit;
+    const secondMerge = sortedSecond === undefined ? undefined : byTask.get(sortedSecond)?.mergeCommit;
+    expect(firstMerge).toMatch(/^[0-9a-f]{40}$/);
+    expect(secondMerge).toMatch(/^[0-9a-f]{40}$/);
+    expect(await mergeParents(repoDir, secondMerge ?? "")).toContain(firstMerge ?? "");
+  });
+});
+
 async function readFileSafe(dir: string, rel: string): Promise<string> {
   return readFile(join(dir, rel), "utf8");
 }

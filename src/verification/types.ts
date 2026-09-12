@@ -89,6 +89,14 @@ const MergeTrainItemSchema = z
     workerId: idSchema,
     expectedBaseCommit: commitShaSchema,
     testRunId: idSchema,
+    /**
+     * Optional caller-determined integration position. Items with a sequence
+     * integrate first (ascending); items without one keep the legacy
+     * taskId-sorted order after them. Lets callers with a stable order
+     * (e.g. scheduler waves) get deterministic integration order without
+     * depending on random database IDs.
+     */
+    sequence: z.number().int().min(0).optional(),
   })
   .strict();
 

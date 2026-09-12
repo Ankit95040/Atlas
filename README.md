@@ -8,9 +8,12 @@ and resource claims**; Milestone 6 added the **deterministic dependency graph an
 claim-aware scheduler**; Milestone 7 added the **AI planner boundary** (untrusted
 proposals → deterministic validation → M6 scheduler); Milestone 8 added the
 **controlled worker runtime** (approved task → isolated worktree → provider
-execution → Git diff → claim enforcement → structured result); Milestone 9 adds
+execution → Git diff → claim enforcement → structured result); Milestone 9 added
 **verification + merge train** (Atlas-executed tests, independent verification,
-ordered integration onto a train branch — main is never merged).
+ordered integration onto a train branch — main is never merged); Milestone 10
+adds a **reproducible benchmark harness** comparing `SINGLE_AGENT`,
+`DUMB_PARALLEL`, and `ATLAS` strategies with fake providers only — orchestration
+evidence, never real coding-agent productivity claims.
 
 ## Scope (V0.1 so far)
 
@@ -35,7 +38,7 @@ Included:
 - Verification + merge train: Atlas-executed tests, independent verification,
   and approval-gated ordered integration onto a dedicated train branch
   (`src/verification/`); main is never merged
-- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag, planner, workers, verification)
+- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag, planner, workers, verification, benchmark)
 
 Explicitly NOT included (per AGENTS.md):
 
@@ -310,6 +313,49 @@ failure, otherwise commit each merge and record `Commit` + `COMMIT` artifact
 rows. Worker worktrees are only read, never modified; `main` is never
 checked out, merged, or otherwise touched — the train branch awaits human
 approval for any future main-branch step.
+
+## Benchmark harness (Milestone 10)
+
+**Thesis under test:** claim-aware orchestration determines safe parallelism
+and integrates work faster and more reliably than a single strong agent —
+measured, not assumed. Three strategies run the same feature from the same
+base commit: `SINGLE_AGENT` (one synthetic task, union of files/claims),
+`DUMB_PARALLEL` (identical decomposition, concurrent execution, sorted-order
+train, no scheduler), and `ATLAS` (planner → validation → claim-aware waves →
+ordered train). Every run carries `provenance: "fake-provider"`.
+
+**Fairness rules enforced in code** (`src/benchmark/runner.ts`): main HEAD +
+cleanliness asserted before and after every strategy run; per-run branches,
+workspaces, and DB rows; sequential execution; all filesystem state removed
+in `finally` (worktree removal + `pruneWorktrees`); identical verification
+bar and identical merge machinery for all strategies.
+
+**Three conflicts, never conflated:** *resource-claim conflict* (scheduler
+input), *Git merge conflict* (only counted from `CONFLICT` train items), and
+*semantic conflict* (not measured — no such metric exists). Raw observations
+come first; only directly supported derivations (`speedupVsSingle`,
+`costDeltaVsSingle` from declared simulated costs, failure/conflict/rework
+rates) are computed. Assessment findings (`ATLAS_SERIALIZED`,
+`SINGLE_AGENT_FASTER`, …) are data for later kill-criteria evaluation, never
+verdicts. Fake timing/cost prove orchestration behavior only.
+
+**Expected outcomes on overlapping writes:** for scenarios where two tasks
+rewrite the same lines (e.g. `shared-counter`, `auth-billing-shared-config`),
+`HALTED + conflict` **is the expected ATLAS result**. Serialization moves the
+conflict out of execution (workers never run concurrently on the same
+resource) but does not eliminate it: both workers are still based on the same
+original base commit, so their outputs genuinely collide in the merge train.
+The metric records that Atlas serialized correctly *and* that the outputs
+genuinely conflict — both facts are true at once.
+
+**Serial scheduling means serial worker execution only.** Later workers are
+NOT rebased onto earlier integrated work; each worker's worktree stays based
+on the original base commit from planning time. Consequently, workers that ran
+in different waves can still produce a Git merge conflict when their branches
+are merged in sequence during the ordered train. No auto-resolution is
+attempted — the train halts on the first conflict and records it as evidence.
+This is intentional V0.1 behavior: rebase, re-plan-after-wave, and
+conflict-aware rescheduling are explicitly out of scope (see AGENTS.md).
 
 ## Prerequisites
 
