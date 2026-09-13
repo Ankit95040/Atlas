@@ -6,7 +6,14 @@ import { getPrismaClient } from "../../db/client.js";
 import { getCurrentCommit, isClean, pruneWorktrees, removeWorktree, runGit } from "../../git/index.js";
 import { BenchmarkError } from "../errors.js";
 import type { BenchmarkStrategy } from "../types.js";
-import { runRealAtlas, runRealDumbParallel, runRealSingleAgent, type RealStrategyOutput } from "./strategies.js";import { compareRealRuns } from "./metrics.js";
+import {
+  runRealAtlas,
+  runRealAtlasEvolving,
+  runRealDumbParallel,
+  runRealSingleAgent,
+  type RealStrategyOutput,
+} from "./strategies.js";
+import { compareRealRuns } from "./metrics.js";
 import {
   RealWorkloadSpecSchema,
   type RealAgentConfig,
@@ -257,6 +264,9 @@ async function buildRealRunResult(args: {
             order: [...outcome.integrationOrder],
           },
     triageClassifications: [...outcome.triageClassifications],
+    waveBases: (outcome as { waveBases?: readonly string[] }).waveBases
+      ? [...((outcome as { waveBases?: readonly string[] }).waveBases as readonly string[])]
+      : null,
     metrics: {
       peakConcurrency: args.peakConcurrency,
       taskCount: outcome.executed.length,
@@ -315,6 +325,11 @@ async function runOneRealStrategy(
       outcome = dumb;
       peakConcurrency = dumb.peakConcurrency;
       scheduling = null;
+    } else if (strategy === "ATLAS_EVOLVING") {
+      const evolving = await runRealAtlasEvolving(ctx);
+      outcome = evolving;
+      peakConcurrency = evolving.peakConcurrency;
+      scheduling = evolving.scheduling;
     } else {
       const atlas = await runRealAtlas(ctx);
       outcome = atlas;
@@ -372,7 +387,7 @@ export async function runRealBenchmark(
   if (!Number.isInteger(minSuccessfulRuns) || minSuccessfulRuns < 1) {
     throw new BenchmarkError("minSuccessfulRuns must be an integer >= 1");
   }
-  if (strategies.includes("ATLAS") && parsed.features.length !== 1) {
+  if ((strategies.includes("ATLAS") || strategies.includes("ATLAS_EVOLVING")) && parsed.features.length !== 1) {
     throw new BenchmarkError("the ATLAS arm derives its task set from one feature");
   }
   const db = options.db ?? getPrismaClient();

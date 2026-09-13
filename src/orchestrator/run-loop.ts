@@ -56,6 +56,8 @@ export interface WaveLoopResult {
    * no classification logic, and triage never alters the train result.
    */
   readonly triage: TriageReport | null;
+  /** Per-wave integration base (original for V0.1, evolving trainHead for V0.2). */
+  readonly waveBases?: readonly string[];
 }
 
 /**
@@ -131,6 +133,15 @@ export async function runFeatureWaveLoop(
   const maxRounds = input.maxWaves ?? allTaskIds.length + 1;
   const waves: string[][] = [];
   const outcomesByTask = new Map<string, TaskOutcome>();
+  const waveBases: string[] = [];
+  const baseMode = input.baseMode ?? "original";
+
+  // Evolving mode tracks the current train head; original mode keeps the
+  // initial baseCommit for every wave. The barrier is explicit: next wave
+  // starts only after prior wave's integration (if any) is known.
+  let currentTrainHead = input.baseCommit;
+  let lastTrain: MergeTrainResult | null = null;
+  let lastTriage: TriageReport | null = null;
 
   for (let round = 0; round < maxRounds; round += 1) {
     const schedulerInput = await loadSchedulerInput(
@@ -151,11 +162,84 @@ export async function runFeatureWaveLoop(
     const waveWorkers = poolIds.slice(poolCursor, poolCursor + fresh.length);
     poolCursor += fresh.length;
     waves.push([...fresh]);
+    const waveBase = baseMode === "evolving" ? currentTrainHead : input.baseCommit;
+    waveBases.push(waveBase);
     const results = await Promise.all(
-      fresh.map((taskId, index) => runOneTask(db, input, deps, track, taskId, waveWorkers[index] as string)),
+      fresh.map((taskId, index) => runOneTask(db, input, deps, track, taskId, waveWorkers[index] as string, waveBase)),
     );
     for (const outcome of results) {
       outcomesByTask.set(outcome.taskId, outcome);
+    }
+
+    // In evolving mode, integrate each wave immediately so next wave can be
+    // cut from the resulting train head. Original mode defers integration
+    // until all waves have executed.
+    if (baseMode === "evolving") {
+      const waveOutcomes = results;
+      const verifiedWave = waveOutcomes.filter((o) => o.verification?.verdict === "VERIFIED" && o.testRun !== null);
+      if (verifiedWave.length === 0) {
+        // No verifiable work in this wave — train head stays, continue to next wave.
+        continue;
+      }
+      const waveTrainApproval = await createApproval({ featureId: feature.id }, db);
+      track("approval", waveTrainApproval.id);
+      await decideApproval(waveTrainApproval.id, { decision: "APPROVED", actor: input.approvalActor }, db);
+      const waveTrain = await runMergeTrain(
+        {
+          repositoryId: repository.id,
+          trainBranch: `${input.trainBranch}/wave-${round}`,
+          trainPath: `${input.trainPath}-wave-${round}`,
+          baseCommit: waveBase,
+          approvalId: waveTrainApproval.id,
+          items: verifiedWave.map((outcome, index) => ({
+            taskId: outcome.taskId,
+            workerId: outcome.workerId,
+            expectedBaseCommit: waveBase,
+            testRunId: (outcome.testRun as TestExecutionResult).testRunId,
+            sequence: index,
+          })),
+          ...(input.testCommand !== undefined ? { testCommand: [...input.testCommand] } : {}),
+        },
+        db,
+      );
+      await trackTaskEvidence(
+        db,
+        track,
+        waveOutcomes.map((o) => o.taskId),
+      );
+      if (waveTrain.status === "COMPLETED") {
+        currentTrainHead = waveTrain.finalCommit;
+        lastTrain = waveTrain;
+        lastTriage = null;
+      } else {
+        // Halt: record triage for this wave and stop scheduling further waves.
+        let triage: TriageReport | null = null;
+        try {
+          triage = await triageIntegrationHalt(
+            {
+              repositoryId: repository.id,
+              baseCommit: waveBase,
+              finalCommit: waveTrain.finalCommit,
+              items: waveTrain.items.map((item) => ({
+                taskId: item.taskId,
+                workerId: item.workerId,
+                status: item.status,
+                ...(item.testRunId !== undefined ? { testRunId: item.testRunId } : {}),
+                ...(item.mergeCommit !== undefined ? { mergeCommit: item.mergeCommit } : {}),
+                ...(item.reason !== undefined ? { reason: item.reason } : {}),
+              })),
+              scratchParent: join(input.workspaceRoot, "triage"),
+            },
+            db,
+          );
+          track("artifact", triage.evidenceRefs.artifactId);
+        } catch {
+          triage = null;
+        }
+        lastTrain = waveTrain;
+        lastTriage = triage;
+        break;
+      }
     }
   }
 
@@ -169,10 +253,54 @@ export async function runFeatureWaveLoop(
     }
   });
 
+  if (baseMode === "evolving") {
+    // Evolving mode already integrated per wave. If no verified work at all,
+    // there is no train; otherwise return the last wave's train.
+    if (lastTrain === null) {
+      const anyVerified = outcomes.filter((o) => o.verification?.verdict === "VERIFIED" && o.testRun !== null);
+      if (anyVerified.length === 0) {
+        await trackTaskEvidence(db, track, outcomes.map((o) => o.taskId));
+        return {
+          featureId: feature.id,
+          repositoryId: repository.id,
+          baseCommit: input.baseCommit,
+          waves,
+          outcomes,
+          train: null,
+          triage: null,
+          waveBases,
+        };
+      }
+      // No integration happened (e.g., all verified waves had empty diffs) — fallback to null.
+      await trackTaskEvidence(db, track, outcomes.map((o) => o.taskId));
+      return {
+        featureId: feature.id,
+        repositoryId: repository.id,
+        baseCommit: input.baseCommit,
+        waves,
+        outcomes,
+        train: lastTrain,
+        triage: lastTriage,
+        waveBases,
+      };
+    }
+    await trackTaskEvidence(db, track, outcomes.map((o) => o.taskId));
+    return {
+      featureId: feature.id,
+      repositoryId: repository.id,
+      baseCommit: input.baseCommit,
+      waves,
+      outcomes,
+      train: lastTrain,
+      triage: lastTriage,
+      waveBases,
+    };
+  }
+
   const verified = outcomes.filter((outcome) => outcome.verification?.verdict === "VERIFIED" && outcome.testRun !== null);
   if (verified.length === 0) {
     await trackTaskEvidence(db, track, outcomes.map((outcome) => outcome.taskId));
-    return { featureId: feature.id, repositoryId: repository.id, baseCommit: input.baseCommit, waves, outcomes, train: null, triage: null };
+    return { featureId: feature.id, repositoryId: repository.id, baseCommit: input.baseCommit, waves, outcomes, train: null, triage: null, waveBases };
   }
 
   const trainApproval = await createApproval({ featureId: feature.id }, db);
@@ -234,7 +362,7 @@ export async function runFeatureWaveLoop(
       triage = null;
     }
   }
-  return { featureId: feature.id, repositoryId: repository.id, baseCommit: input.baseCommit, waves, outcomes, train, triage };
+  return { featureId: feature.id, repositoryId: repository.id, baseCommit: input.baseCommit, waves, outcomes, train, triage, waveBases };
 }
 
 /**
@@ -272,7 +400,9 @@ async function runOneTask(
   track: (model: string, id: string) => void,
   taskId: string,
   workerId: string,
+  waveBase?: string,
 ): Promise<TaskOutcome> {
+  const baseCommit = waveBase ?? input.baseCommit;
   const approval = await createApproval({ taskId }, db);
   track("approval", approval.id);
   await decideApproval(approval.id, { decision: "APPROVED", actor: input.approvalActor }, db);
@@ -283,14 +413,14 @@ async function runOneTask(
       workerId,
       repositoryId: input.repositoryId,
       workspaceRoot: join(input.workspaceRoot, "ws", taskId),
-      base: input.baseCommit,
+      base: baseCommit,
     },
     db,
   );
   track("workspace", assignment.workspace.id);
 
   const execution = await executeTask(
-    { taskId, workerId, expectedBaseCommit: input.baseCommit },
+    { taskId, workerId, expectedBaseCommit: baseCommit },
     deps.createProvider(taskId),
     db,
   );
@@ -309,7 +439,7 @@ async function runOneTask(
   track("testRun", testRun.testRunId);
 
   const verification = await verifyExecution(
-    { taskId, workerId, expectedBaseCommit: input.baseCommit, testRunId: testRun.testRunId },
+    { taskId, workerId, expectedBaseCommit: baseCommit, testRunId: testRun.testRunId },
     db,
   );
   if (verification.verdict === "VERIFIED") {

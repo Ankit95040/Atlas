@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const BenchmarkStrategySchema = z.enum(["SINGLE_AGENT", "DUMB_PARALLEL", "ATLAS"]);
+export const BenchmarkStrategySchema = z.enum(["SINGLE_AGENT", "DUMB_PARALLEL", "ATLAS", "ATLAS_EVOLVING"]);
 export type BenchmarkStrategy = z.infer<typeof BenchmarkStrategySchema>;
 
 export const ScenarioKindSchema = z.enum([

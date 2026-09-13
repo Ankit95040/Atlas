@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { commitShaSchema } from "../../core/inputs.js";
 import { BenchmarkStrategySchema } from "../types.js";
 
 // ---------- Real agent configuration (provider-agnostic) ----------
@@ -209,6 +210,8 @@ export const RealRunResultSchema = z
     integration: realIntegrationRecordSchema.nullable(),
     /** M13 triage classifications observed on HALTED trains; empty otherwise. */
     triageClassifications: z.array(z.string()),
+    /** Per-wave integration base (original for V0.1, evolving trainHead for V0.2). Null/empty when not recorded. */
+    waveBases: z.array(commitShaSchema).nullable().optional(),
     metrics: z.object({
       peakConcurrency: z.number().int().min(0),
       taskCount: z.number().int().min(0),

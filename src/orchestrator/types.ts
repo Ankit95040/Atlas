@@ -39,6 +39,14 @@ export const RunFeatureWaveLoopInputSchema = z
     testCommand: z.array(z.string().min(1)).min(1).max(50).optional(),
     /** Safety bound on scheduling rounds; defaults to taskCount + 1. */
     maxWaves: z.number().int().min(1).max(1000).optional(),
+    /**
+     * How wave bases are chosen. `original` (default, frozen V0.1) creates
+     * every wave from the initial benchmark baseCommit. `evolving` (V0.2)
+     * creates each wave from the latest successfully integrated train HEAD,
+     * preserving the wave barrier: later waves start only after prior waves
+     * have integrated, and workers within a wave remain parallel.
+     */
+    baseMode: z.enum(["original", "evolving"]).default("original"),
   })
   .strict();
 

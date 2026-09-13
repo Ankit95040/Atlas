@@ -67,6 +67,8 @@ export interface RealStrategyOutput {
   /** M13 triage classifications observed on HALTED trains; empty otherwise. */
   readonly triageClassifications: string[];
   readonly triageArtifactIds: string[];
+  /** Per-wave base commits (original for V0.1, evolving for V0.2). */
+  readonly waveBases?: readonly string[];
 }
 
 interface PersistedRealDecomposition {
@@ -483,5 +485,104 @@ export async function runRealAtlas(ctx: RealStrategyContext): Promise<RealStrate
     scheduling,
     triageClassifications: loop.triage !== null ? [...loop.triage.classifications] : [],
     triageArtifactIds: [],
+    waveBases: loop.waveBases ?? [],
+  };
+}
+
+/**
+ * ATLAS_EVOLVING: same as ATLAS but with evolving integration base.
+ * Each wave's workers are cut from the latest successfully integrated train
+ * HEAD, so disjoint-line edits to the same file can merge cleanly without
+ * changing scheduler decisions.
+ */
+export async function runRealAtlasEvolving(ctx: RealStrategyContext): Promise<RealStrategyOutput> {
+  const spec = ctx.workload;
+  if (spec.features.length !== 1) {
+    throw new BenchmarkError("real ATLAS_EVOLVING arm requires single-feature workloads");
+  }
+  const persisted = await persistRealDecomposition(
+    ctx,
+    [...spec.tasks].sort((a, b) => (a.key < b.key ? -1 : 1)).map((task) => ({
+      key: task.key,
+      title: task.title,
+      description: task.description,
+      featureKey: task.featureKey,
+      claims: task.claims.map((claim) => ({ resource: claim.resource, access: claim.access })),
+      dependsOn: [...task.dependsOn],
+    })),
+  );
+  const idToKey = new Map([...persisted.taskIds.entries()].map(([key, id]) => [id, key] as const));
+  const featureId = [...persisted.featureIds.values()].sort()[0];
+  if (featureId === undefined) {
+    throw new BenchmarkError("no features persisted");
+  }
+
+  const workerIds: string[] = [];
+  for (let index = 0; index < spec.tasks.length; index += 1) {
+    const worker = await createWorker({}, ctx.db);
+    ctx.track("worker", worker.id);
+    workerIds.push(worker.id);
+  }
+  const initialPlan = planSchedule(
+    await loadSchedulerInput({ taskIds: [...persisted.taskIds.values()], workerIds, maxConcurrency: spec.tasks.length }, ctx.db),
+  );
+  const toKey = (id: string): string => idToKey.get(id) ?? id;
+  const scheduling: RealSchedulingRecord = {
+    waves: initialPlan.groups.map((group) => group.tasks.map(toKey).sort()),
+    conflicts: initialPlan.resourceConflicts.map((c) => {
+      const a = toKey(c.taskA);
+      const b = toKey(c.taskB);
+      return (a < b ? [a, b] : [b, a]) as [string, string];
+    }),
+    blocked: initialPlan.blockedTasks.map((entry) => ({ key: toKey(entry.taskId), reason: entry.reason })),
+  };
+
+  const prompts = new Map([...spec.tasks].map((task) => [task.key, renderTaskPrompt(promptView(task), spec.featureSpec.title)]));
+  const loop = await runFeatureWaveLoop(
+    {
+      featureId,
+      repositoryId: persisted.repositoryId,
+      baseCommit: ctx.baseCommit,
+      workspaceRoot: join(ctx.scratchRoot, "atlas-ws-evolving"),
+      trainBranch: `atlas/real-benchmark/${ctx.runId}/atlas-evolving`,
+      trainPath: join(ctx.scratchRoot, "train-atlas-evolving"),
+      approvalActor: "real-benchmark",
+      maxConcurrency: spec.tasks.length,
+      testCommand: [...spec.testCommand],
+      baseMode: "evolving",
+    },
+    {
+      createProvider: (taskId: string) => {
+        const key = idToKey.get(taskId);
+        const prompt = key !== undefined ? prompts.get(key) : undefined;
+        if (key === undefined || prompt === undefined) {
+          throw new BenchmarkError(`no shared prompt for task ${taskId}`);
+        }
+        return buildAgentProvider(prompt, ctx.agent);
+      },
+      track: ctx.track,
+    },
+    ctx.db,
+  );
+  const executed: RealExecutedTask[] = loop.outcomes.map((outcome) => ({
+    key: idToKey.get(outcome.taskId) ?? outcome.taskId,
+    taskId: outcome.taskId,
+    workerId: outcome.workerId,
+    execution: outcome.execution,
+    testRun: outcome.testRun,
+    verification: outcome.verification,
+    workerMs: null,
+  }));
+  const atlasOrder = loop.waves.flat().map(toKey);
+  const peakConcurrency = loop.waves.reduce((peak, wave) => Math.max(peak, wave.length), 0);
+  return {
+    executed,
+    integration: loop.train,
+    peakConcurrency,
+    integrationOrder: atlasOrder,
+    scheduling,
+    triageClassifications: loop.triage !== null ? [...loop.triage.classifications] : [],
+    triageArtifactIds: [],
+    waveBases: loop.waveBases ?? [],
   };
 }
