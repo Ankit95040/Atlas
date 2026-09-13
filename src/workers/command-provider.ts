@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { z } from "zod";
 import type { WorkerExecutionInput } from "./types.js";
 import type { WorkerProvider } from "./provider.js";
@@ -30,6 +30,11 @@ export type CommandWorkerConfig = z.infer<typeof CommandWorkerConfigSchema>;
 const EXEC_MAX_BUFFER = 8 * 1024 * 1024;
 const STDOUT_NOTES_CAP = 2000;
 const STDERR_NOTES_CAP = 2000;
+// Grace period between SIGTERM and SIGKILL escalation. Fixed so timeout
+// behavior stays deterministic: every timeout resolves within
+// timeoutMs + SIGKILL_GRACE_MS.
+const SIGKILL_GRACE_MS = 5000;
+const STDERR_HEAD_CAP = 2000;
 
 function truncate(text: string, cap: number): string {
   return text.length <= cap ? text : text.slice(0, cap);
@@ -54,24 +59,115 @@ interface ObservedCommand {
   readonly stderr: string;
 }
 
+/**
+ * Kill the child and everything it spawned. The child runs as a process-group
+ * leader (detached), so a negative-pid signal reaches orphaned grandchildren
+ * too — a rate-limited agent stuck in a retry loop cannot leave strays
+ * behind to hold worktrees or locks. Falls back to a direct kill where
+ * process groups are unavailable.
+ */
+function killTree(child: { pid?: number | undefined; kill: (signal: NodeJS.Signals) => boolean }, signal: NodeJS.Signals): void {
+  try {
+    if (child.pid !== undefined && process.platform !== "win32") {
+      process.kill(-child.pid, signal);
+      return;
+    }
+  } catch {
+    // Fall through: the group may already be gone.
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // Best effort: the process may already be gone.
+  }
+}
+
 function runCommand(executable: string, args: string[], cwd: string, timeoutMs: number, env: Record<string, string>): Promise<ObservedCommand> {
   return new Promise((resolve, reject) => {
-    const child = execFile(executable, args, { cwd, timeout: timeoutMs, maxBuffer: EXEC_MAX_BUFFER, env }, (error, stdout, stderr) => {
-      if (error !== null) {
-        reject(error);
+    const child = spawn(executable, args, {
+      cwd,
+      env,
+      // stdin is /dev/null here (not an open unwritten pipe): a child that
+      // reads stdin observes EOF immediately instead of waiting for it.
+      // stdout/stderr stay piped for bounded capture below.
+      stdio: ["ignore", "pipe", "pipe"],
+      // New process group so timeout escalation reaches the whole tree.
+      detached: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanupTimers = (): void => {
+      if (killTimer !== undefined) {
+        clearTimeout(killTimer);
+        killTimer = undefined;
+      }
+      if (graceTimer !== undefined) {
+        clearTimeout(graceTimer);
+        graceTimer = undefined;
+      }
+    };
+    const fail = (message: string): void => {
+      if (settled) {
         return;
       }
-      resolve({ stdout: typeof stdout === "string" ? stdout : "", stderr: typeof stderr === "string" ? stderr : "" });
+      settled = true;
+      cleanupTimers();
+      killTree(child, "SIGKILL");
+      reject(new Error(message));
+    };
+
+    child.stdout?.on("data", (chunk: Buffer | string) => {
+      stdout += String(chunk);
+      if (stdout.length + stderr.length > EXEC_MAX_BUFFER) {
+        fail(`command output exceeded ${EXEC_MAX_BUFFER} bytes`);
+      }
     });
-    // execFile leaves child stdin as an open pipe with no writer: a child
-    // that reads stdin would wait for EOF until the timeout kills it.
-    // Ending stdin up front delivers EOF immediately without affecting
-    // stdout/stderr capture, timeout, or environment handling.
-    try {
-      child.stdin?.end();
-    } catch {
-      // Best effort: a child without piped stdin has nothing to close.
-    }
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      stderr += String(chunk);
+      if (stdout.length + stderr.length > EXEC_MAX_BUFFER) {
+        fail(`command output exceeded ${EXEC_MAX_BUFFER} bytes`);
+      }
+    });
+    child.on("error", (error) => {
+      fail(`command failed to start: ${errorMessage(error)}`);
+    });
+    child.on("close", (code, signal) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanupTimers();
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      const tail = stderr.slice(-STDERR_HEAD_CAP);
+      reject(
+        new Error(
+          signal !== null && signal !== undefined
+            ? `command terminated by ${signal}${tail.length > 0 ? `: ${tail}` : ""}`
+            : `command exited with code ${code ?? "unknown"}${tail.length > 0 ? `: ${tail}` : ""}`,
+        ),
+      );
+    });
+
+    // Timeout with escalation: SIGTERM first so well-behaved agents flush
+    // and exit, then SIGKILL so a SIGTERM-ignoring process (e.g. stuck in a
+    // provider retry loop after a rate-limit error) cannot hang the worker
+    // indefinitely. execFile's single-SIGTERM timeout is insufficient here.
+    killTimer = setTimeout(() => {
+      killTree(child, "SIGTERM");
+      graceTimer = setTimeout(() => {
+        // Include stderr so provider-side diagnostics (e.g. a rate-limit
+        // error printed before stalling) survive into the recorded failure.
+        const tail = stderr.slice(-STDERR_HEAD_CAP);
+        fail(`command timed out after ${timeoutMs}ms${tail.length > 0 ? `: ${tail}` : ""}`);
+      }, SIGKILL_GRACE_MS);
+    }, timeoutMs);
   });
 }
 

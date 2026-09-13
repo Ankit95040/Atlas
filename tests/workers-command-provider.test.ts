@@ -204,6 +204,37 @@ describe("command worker provider", () => {
     expect(elapsedMs).toBeLessThan(15000);
   }, 60000);
 
+  it("terminates a SIGTERM-ignoring child that errors but stays alive", async () => {
+    // Regression for rate-limited providers: the child prints an API error
+    // (like a rate-limit message) and then ignores SIGTERM, staying alive.
+    // A single-SIGTERM timeout cannot end that wait; the provider must
+    // escalate to SIGKILL and return a failure instead of hanging.
+    const dir = await makeTempDir();
+    const startedAt = Date.now();
+    const error = await new CommandWorkerProvider({
+      command: [
+        process.execPath,
+        "-e",
+        "process.on('SIGTERM', () => {}); console.error('AI_APICallError: Rate limit exceeded. Please try again later.'); setInterval(() => {}, 1000);",
+      ],
+      timeoutMs: 1000,
+    })
+      .execute(providerInput(dir))
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(error).toBeInstanceOf(Error);
+    expect(String((error as Error)?.message ?? "")).toContain("timed out after 1000ms");
+    // Provider diagnostics survive into the recorded failure.
+    expect(String((error as Error)?.message ?? "")).toContain("Rate limit exceeded");
+    // Bounded by timeout + SIGKILL grace (5s) with slack: without escalation
+    // this would hang until the test timeout instead.
+    expect(elapsedMs).toBeLessThan(15000);
+  }, 60000);
+
   it("forwards no host secrets by default; allowlisted vars pass through", async () => {
     process.env["ATLAS_M11_TEST_SECRET"] = "topsecret-secret";
     process.env["ATLAS_M11_TEST_PUBLIC"] = "public-value";
