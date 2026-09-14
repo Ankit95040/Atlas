@@ -17,6 +17,7 @@ import {
 import { OrchestratorError } from "./errors.js";
 import { RunFeatureWaveLoopInputSchema, type RunFeatureWaveLoopInput } from "./types.js";
 import { triageIntegrationHalt, type TriageReport } from "../triage/index.js";
+import type { IntegratedItem } from "../verification/types.js";
 
 export interface WaveLoopDependencies {
   /**
@@ -142,6 +143,7 @@ export async function runFeatureWaveLoop(
   let currentTrainHead = input.baseCommit;
   let lastTrain: MergeTrainResult | null = null;
   let lastTriage: TriageReport | null = null;
+  const evolvingCumulativeItems: IntegratedItem[] = [];
 
   for (let round = 0; round < maxRounds; round += 1) {
     const schedulerInput = await loadSchedulerInput(
@@ -209,10 +211,24 @@ export async function runFeatureWaveLoop(
       );
       if (waveTrain.status === "COMPLETED") {
         currentTrainHead = waveTrain.finalCommit;
-        lastTrain = waveTrain;
+        // Accumulate successfully integrated items for the final cumulative result
+        for (const item of waveTrain.items) {
+          if (item.status === "INTEGRATED") {
+            evolvingCumulativeItems.push(item);
+          }
+        }
+        // Keep a synthetic cumulative train representing all waves so far
+        lastTrain = {
+          ...waveTrain,
+          items: [...evolvingCumulativeItems].sort((a, b) => (a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0)),
+        };
         lastTriage = null;
       } else {
         // Halt: record triage for this wave and stop scheduling further waves.
+        // Cumulative should include prior successful waves plus this halted wave's items
+        const haltedItems = [...evolvingCumulativeItems, ...waveTrain.items].sort((a, b) =>
+          a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0,
+        );
         let triage: TriageReport | null = null;
         try {
           triage = await triageIntegrationHalt(
@@ -236,7 +252,10 @@ export async function runFeatureWaveLoop(
         } catch {
           triage = null;
         }
-        lastTrain = waveTrain;
+        lastTrain = {
+          ...waveTrain,
+          items: haltedItems,
+        };
         lastTriage = triage;
         break;
       }
