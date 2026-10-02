@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { PrismaClient } from "@prisma/client";
 import { getPrismaClient } from "../db/client.js";
+import { ApiHomeSchema, ApiRunSummarySchema, type ApiRunSummary } from "./api.js";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -182,6 +184,117 @@ function titlesOf(tasks: Array<{ id: string; title: string }>): Map<string, stri
   return new Map(tasks.map((t) => [t.id, t.title] as const));
 }
 
+// React frontend shell (M26 PoC): serves the Vite build output and a narrow
+// read-only JSON API. Same rules as everything else here: GET only, existing
+// loaders only, no orchestration, no mutations.
+
+const APP_MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
+  ".ttf": "font/ttf",
+};
+
+async function serveApp(response: ServerResponse, pathname: string): Promise<void> {
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "apps", "web", "dist");
+  const relative = pathname === "/app" || pathname === "/app/" ? "index.html" : pathname.slice("/app/".length);
+  if (relative.includes("..") || relative.includes("\\") || relative === "") {
+    send(response, 404, renderNotFound(`No app file for ${pathname}.`));
+    return;
+  }
+  const dot = relative.lastIndexOf(".");
+  const ext = dot >= 0 ? relative.slice(dot) : "";
+  const mime = APP_MIME[ext];
+  if (mime === undefined) {
+    send(response, 404, renderNotFound(`No app file for ${pathname}.`));
+    return;
+  }
+  let body: Buffer;
+  try {
+    body = await readFile(join(root, relative));
+  } catch {
+    if (ext === ".html" || !relative.includes("/") || pathname === "/app") {
+      try {
+        body = await readFile(join(root, "index.html"));
+      } catch {
+        send(response, 404, renderNotFound(`No app file for ${pathname}.`));
+        return;
+      }
+    } else {
+      send(response, 404, renderNotFound(`No app file for ${pathname}.`));
+      return;
+    }
+  }
+  response.writeHead(200, {
+    "content-type": mime,
+    "cache-control": ext === ".html" ? "no-store" : "public, max-age=3600",
+    "content-length": body.length,
+  });
+  response.end(body);
+}
+
+function sendJson(response: ServerResponse, status: number, value: unknown): void {
+  const body = Buffer.from(JSON.stringify(value), "utf8");
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  response.end(body);
+}
+
+async function serveApi(response: ServerResponse, pathname: string, db: PrismaClient): Promise<void> {
+  if (pathname === "/api/home") {
+    const home = await loadHome(db);
+    const payload = ApiHomeSchema.parse({
+      metrics: home.metrics,
+      activeRuns: home.activeRuns.map(toApiRun),
+      recentRuns: home.recentRuns.map(toApiRun),
+    });
+    sendJson(response, 200, { ok: true as const, data: payload });
+    return;
+  }
+  if (pathname === "/api/runs") {
+    const runs = await loadRuns(db);
+    sendJson(response, 200, { ok: true as const, data: runs.map(toApiRun).map((r) => ApiRunSummarySchema.parse(r)) });
+    return;
+  }
+  const islandMatch = /^\/api\/run\/([^/]+)\/island$/.exec(pathname);
+  if (islandMatch?.[1] !== undefined) {
+    const graph = await loadWorkflow(db, islandMatch[1]);
+    const scene = buildIslandScene(graph);
+    sendJson(response, 200, { ok: true as const, data: scene });
+    return;
+  }
+  sendJson(response, 404, { ok: false as const, error: `No API route for ${pathname}.` });
+}
+
+function toApiRun(r: {
+  id: string;
+  title: string;
+  status: string;
+  projectId: string;
+  projectName: string;
+  totalTasks: number;
+  workerCount: number;
+  verifiedCount: number;
+  mergeCount: number;
+}): ApiRunSummary {
+  return {
+    id: r.id,
+    title: r.title,
+    status: r.status,
+    projectId: r.projectId,
+    projectName: r.projectName,
+    totalTasks: r.totalTasks,
+    workerCount: r.workerCount,
+    verifiedCount: r.verifiedCount,
+    mergeCount: r.mergeCount,
+  };
+}
+
 async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const method: string = request.method ?? "";
   const url = new URL(request.url ?? "/", "http://localhost");
@@ -196,6 +309,22 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
   const db = getPrismaClient();
   try {
+    if (url.pathname === "/app" || url.pathname.startsWith("/app/")) {
+      if (method !== "GET") {
+        send(response, 405, renderError(`Method ${method} is not allowed.`));
+        return;
+      }
+      await serveApp(response, url.pathname);
+      return;
+    }
+    if (url.pathname.startsWith("/api/")) {
+      if (method !== "GET") {
+        sendJson(response, 405, { ok: false as const, error: `Method ${method} is not allowed: the API is read-only.` });
+        return;
+      }
+      await serveApi(response, url.pathname, db);
+      return;
+    }
     if (url.pathname.startsWith("/ui-static/")) {
       if (method !== "GET") {
         send(response, 405, renderError(`Method ${method} is not allowed.`));

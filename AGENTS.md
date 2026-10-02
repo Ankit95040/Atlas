@@ -20,8 +20,6 @@ This is NOT the full Atlas vision yet.
 
 Do NOT build:
 
-- spatial/island UI
-- React Flow
 - multi-user collaboration
 - semantic merge
 - live rebase
@@ -33,6 +31,11 @@ Do NOT build:
 - autonomous production deployment
 - complex model routing
 - unlimited workers
+
+Visualization note (M24+): a read-only spatial/Island UI is explicitly in
+scope as a *projection* of Atlas state. It must never become orchestration:
+no task scheduling, worker assignment, merging, or state transitions from
+visual components. All safety rules below apply to any UI work.
 
 ## Core Principles
 

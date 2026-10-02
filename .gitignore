@@ -6,5 +6,7 @@ prisma/dev.db*
 .env
 coverage/
 .vitest/
+test-results/
+apps/web/test-results/
 .DS_Store/
 *.log
