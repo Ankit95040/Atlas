@@ -67,9 +67,22 @@ export async function createFeature(raw: unknown, db: PrismaClient = getPrismaCl
 export async function createTask(raw: unknown, db: PrismaClient = getPrismaClient()) {
   const input = CreateTaskInput.parse(raw);
   const { resourceClaims, ...rest } = input;
-  return db.task.create({
+  const task = await db.task.create({
     data: stripUndefined({ ...rest, resourceClaims: serializeResourceClaims(resourceClaims) }),
   });
+  // M19.5 lifecycle: task creation is observable history. Title only —
+  // descriptions can be long and claims live on their own rows.
+  await recordEvent(
+    {
+      type: "TASK_CREATED",
+      featureId: task.featureId,
+      taskId: task.id,
+      actor: "atlas-core",
+      payload: { title: task.title },
+    },
+    db,
+  );
+  return task;
 }
 
 export async function createTaskDependency(raw: unknown, db: PrismaClient = getPrismaClient()) {
@@ -216,7 +229,17 @@ export async function transitionFeature(
 
 export async function transitionTask(
   id: string,
-  to: "PENDING" | "READY" | "CLAIMED" | "IN_PROGRESS" | "BLOCKED" | "VERIFICATION" | "COMPLETED" | "FAILED" | "CANCELLED",
+  to:
+    | "PENDING"
+    | "READY"
+    | "CLAIMED"
+    | "IN_PROGRESS"
+    | "BLOCKED"
+    | "VERIFICATION"
+    | "COMPLETED"
+    | "COMPLETED_EMPTY"
+    | "FAILED"
+    | "CANCELLED",
   db = getPrismaClient(),
 ) {
   const current = await db.task.findUnique({ where: { id } });
@@ -234,6 +257,35 @@ export async function transitionWorker(
   return applyTransition("Worker", current, id, to, WORKER_TRANSITIONS, (_current, status) =>
     db.worker.update({ where: { id }, data: { status } }),
   );
+}
+
+/**
+ * Terminal workers that hold no live assignment. Only terminal states
+ * qualify — releasing a live (ASSIGNED/RUNNING/VERIFYING) link would break
+ * the execution/verification/train readers that prove linkage through
+ * `Worker.taskId`, so that is refused loudly instead of corrupting state.
+ * Idempotent: an already-unlinked worker is returned unchanged.
+ */
+/**
+ * Workers in these states hold no live assignment and are never reusable.
+ * Exported so assignment keeps one definition of "terminal reservation".
+ */
+export const TERMINAL_WORKER_STATUS_SET: ReadonlySet<string> = new Set(["COMPLETED", "FAILED", "STOPPED"]);
+
+export async function releaseWorkerAssignment(id: string, db: PrismaClient = getPrismaClient()) {
+  const current = await db.worker.findUnique({ where: { id } });
+  if (current === null) {
+    throw new NotFoundError("Worker", id);
+  }
+  if (current.taskId === null) {
+    return current;
+  }
+  if (!TERMINAL_WORKER_STATUS_SET.has(current.status)) {
+    throw new InvariantViolationError(
+      `worker ${id} is ${current.status}: live assignments are never released, only terminal reservations`,
+    );
+  }
+  return db.worker.update({ where: { id }, data: { taskId: null } });
 }
 
 export async function transitionWorkspace(

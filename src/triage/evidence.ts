@@ -7,6 +7,7 @@ import {
   removeWorktree,
   runGit,
 } from "../git/index.js";
+import { findHistoricalWorkerId } from "../workspaces/index.js";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -18,7 +19,15 @@ export async function resolveTaskBranch(
   repoRoot: string,
   taskId: string,
 ): Promise<{ branch: string } | { unknown: string }> {
-  const worker = await db.worker.findUnique({ where: { taskId }, include: { workspace: true } });
+  const live = await db.worker.findUnique({ where: { taskId }, include: { workspace: true } });
+  // M23.1: integrated tasks no longer hold a live worker link (released at
+  // INTEGRATED), so fall back to the historically linked worker from event
+  // payloads. Halted items keep live links; this only widens resolution.
+  let worker = live;
+  if (worker === null) {
+    const historicalId = await findHistoricalWorkerId(db, taskId);
+    worker = historicalId === null ? null : await db.worker.findUnique({ where: { id: historicalId }, include: { workspace: true } });
+  }
   const stored = worker?.workspace?.branch ?? null;
   if (stored === null) {
     return { unknown: `task ${taskId} has no recorded worker branch` };

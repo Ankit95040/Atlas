@@ -3,9 +3,21 @@ import "dotenv/config";
 import { Command } from "commander";
 import { disconnectDatabase } from "../db/client.js";
 import { formatDoctorResult, runDoctor } from "./doctor.js";
+import { runInitCommand } from "./init.js";
 import { EXIT_USAGE, writeCommandError, writeCommandOutput } from "./output.js";
 import { runPlanCommand } from "./plan.js";
+import { runRecoverTaskCommand } from "./recover.js";
 import { runRunCommand } from "./run-command.js";
+import { runTaskTransitionCommand } from "./transition.js";
+import {
+  runClaimsCommand,
+  runDiagnoseCommand,
+  runHistoryCommand,
+  runShowRunCommand,
+  runShowTaskCommand,
+  runShowWorkerCommand,
+  runStatusCommand,
+} from "./show.js";
 
 const ATLAS_VERSION = "0.1.0";
 
@@ -30,6 +42,76 @@ export function createProgram(): Command {
     });
 
   program
+    .command("init")
+    .description("Create the prerequisite project, repository, and feature rows for a Git checkout (first step before plan)")
+    .requiredOption("--name <name>", "Project name")
+    .requiredOption("--repo-path <path>", "Path to the Git checkout Atlas will orchestrate")
+    .requiredOption("--feature-title <title>", "Title of the first feature")
+    .option("--description <text>", "Project description")
+    .option("--feature-description <text>", "Feature description")
+    .option("--remote-url <url>", "Repository remote URL")
+    .option("--default-branch <branch>", "Repository default branch")
+    .option("--json", "Machine-readable output")
+    .action(
+      async (opts: {
+        name: string;
+        repoPath: string;
+        featureTitle: string;
+        description?: string;
+        featureDescription?: string;
+        remoteUrl?: string;
+        defaultBranch?: string;
+        json?: boolean;
+      }) => {
+        try {
+          const output = await runInitCommand({
+            name: opts.name,
+            repoPath: opts.repoPath,
+            featureTitle: opts.featureTitle,
+            ...(opts.description !== undefined ? { description: opts.description } : {}),
+            ...(opts.featureDescription !== undefined ? { featureDescription: opts.featureDescription } : {}),
+            ...(opts.remoteUrl !== undefined ? { remoteUrl: opts.remoteUrl } : {}),
+            ...(opts.defaultBranch !== undefined ? { defaultBranch: opts.defaultBranch } : {}),
+          });
+          writeCommandOutput(output, opts.json === true);
+          await disconnectDatabase();
+          process.exitCode = output.exitCode;
+        } catch (error) {
+          writeCommandError(error, opts.json === true);
+          await disconnectDatabase();
+          process.exitCode = EXIT_USAGE;
+        }
+      },
+    );
+
+  const task = program.command("task").description("Operator-driven task state management");
+
+  task
+    .command("transition <task-id>")
+    .description("Move a task along one allowed state-machine edge (stuck-state exit; records actor and reason)")
+    .requiredOption("--to <status>", "Target task status (must be a directly reachable edge)")
+    .requiredOption("--actor <name>", "Human author confirming the transition")
+    .requiredOption("--reason <text>", "Reason recorded on the TASK_TRANSITIONED event")
+    .option("--json", "Machine-readable output")
+    .action(async (taskId: string, opts: { to: string; actor: string; reason: string; json?: boolean }) => {
+      try {
+        const output = await runTaskTransitionCommand({
+          taskId,
+          to: opts.to,
+          actor: opts.actor,
+          reason: opts.reason,
+        });
+        writeCommandOutput(output, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = output.exitCode;
+      } catch (error) {
+        writeCommandError(error, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = EXIT_USAGE;
+      }
+    });
+
+  program
     .command("plan")
     .description("Validate a proposal file, persist its tasks, and preview the schedule (never executes)")
     .requiredOption("--feature <id>", "Feature ID the proposal applies to")
@@ -47,6 +129,149 @@ export function createProgram(): Command {
           ...(opts.actor !== undefined ? { actor: opts.actor } : {}),
           ...(opts.maxConcurrency !== undefined ? { maxConcurrency: Number(opts.maxConcurrency) } : {}),
         });
+        writeCommandOutput(output, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = output.exitCode;
+      } catch (error) {
+        writeCommandError(error, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = EXIT_USAGE;
+      }
+    });
+
+  program
+    .command("status")
+    .description("Read-only overview: task/worker states, recent events, visible failures")
+    .option("--json", "Machine-readable output")
+    .action(async (opts: { json?: boolean }) => {
+      try {
+        const output = await runStatusCommand({});
+        writeCommandOutput(output, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = output.exitCode;
+      } catch (error) {
+        writeCommandError(error, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = EXIT_USAGE;
+      }
+    });
+
+  const show = program.command("show").description("Read-only inspection of runs, tasks, and workers");
+
+  show
+    .command("run <run-id>")
+    .description("Show a run scope (a feature execution): tasks, workers, integration, timing, failures")
+    .option("--json", "Machine-readable output")
+    .action(async (runId: string, opts: { json?: boolean }) => {
+      try {
+        const output = await runShowRunCommand({ runId });
+        writeCommandOutput(output, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = output.exitCode;
+      } catch (error) {
+        writeCommandError(error, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = EXIT_USAGE;
+      }
+    });
+
+  show
+    .command("task <task-id>")
+    .description("Show a task: status, dependencies, claims, assignment, evidence, timing")
+    .option("--json", "Machine-readable output")
+    .action(async (taskId: string, opts: { json?: boolean }) => {
+      try {
+        const output = await runShowTaskCommand({ taskId });
+        writeCommandOutput(output, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = output.exitCode;
+      } catch (error) {
+        writeCommandError(error, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = EXIT_USAGE;
+      }
+    });
+
+  show
+    .command("worker <worker-id>")
+    .description("Show a worker: assignment, workspace, execution, failures, timing")
+    .option("--json", "Machine-readable output")
+    .action(async (workerId: string, opts: { json?: boolean }) => {
+      try {
+        const output = await runShowWorkerCommand({ workerId });
+        writeCommandOutput(output, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = output.exitCode;
+      } catch (error) {
+        writeCommandError(error, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = EXIT_USAGE;
+      }
+    });
+
+  program
+    .command("history <run-id>")
+    .description("Chronological event history for a run scope (a feature execution)")
+    .option("--json", "Machine-readable output")
+    .action(async (runId: string, opts: { json?: boolean }) => {
+      try {
+        const output = await runHistoryCommand({ runId });
+        writeCommandOutput(output, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = output.exitCode;
+      } catch (error) {
+        writeCommandError(error, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = EXIT_USAGE;
+      }
+    });
+
+  program
+    .command("claims <run-id>")
+    .description("Task/resource claims for a run scope with pairwise overlaps")
+    .option("--json", "Machine-readable output")
+    .action(async (runId: string, opts: { json?: boolean }) => {
+      try {
+        const output = await runClaimsCommand({ runId });
+        writeCommandOutput(output, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = output.exitCode;
+      } catch (error) {
+        writeCommandError(error, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = EXIT_USAGE;
+      }
+    });
+
+  program
+    .command("diagnose <run-id>")
+    .description("Failure analysis for a run scope from persisted structured evidence")
+    .option("--json", "Machine-readable output")
+    .action(async (runId: string, opts: { json?: boolean }) => {
+      try {
+        const output = await runDiagnoseCommand({ runId });
+        writeCommandOutput(output, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = output.exitCode;
+      } catch (error) {
+        writeCommandError(error, opts.json === true);
+        await disconnectDatabase();
+        process.exitCode = EXIT_USAGE;
+      }
+    });
+
+  const recover = program
+    .command("recover")
+    .description("Release stranded assignments (explicit human-confirmed recovery only)");
+
+  recover
+    .command("task <task-id>")
+    .description("Release a stranded CLAIMED/ASSIGNED assignment so the task is schedulable again")
+    .requiredOption("--actor <name>", "Human author confirming the recovery")
+    .option("--json", "Machine-readable output")
+    .action(async (taskId: string, opts: { actor: string; json?: boolean }) => {
+      try {
+        const output = await runRecoverTaskCommand({ taskId, actor: opts.actor });
         writeCommandOutput(output, opts.json === true);
         await disconnectDatabase();
         process.exitCode = output.exitCode;

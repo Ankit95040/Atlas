@@ -132,6 +132,7 @@ export type IntegratedItemStatus =
   | "TESTS_FAILED"
   | "VERIFICATION_FAILED"
   | "MERGE_FAILED"
+  | "SKIPPED_EMPTY"
   | "NOT_ATTEMPTED";
 
 export interface IntegratedItem {
@@ -141,6 +142,32 @@ export interface IntegratedItem {
   readonly mergeCommit?: string;
   readonly testRunId?: string;
   readonly reason?: string;
+  /**
+   * Wall-clock ms spent processing this item in the train loop (M19.1:
+   * re-verify, merge, cumulative tests, commit). Always set by
+   * runMergeTrain; optional so previously constructed items still typecheck.
+   */
+  readonly durationMs?: number | null;
+  /**
+   * Worker branch HEAD at merge time (M19.3; durable identity of what was
+   * merged or failed to merge). Best-effort: absent when unreadable.
+   */
+  readonly sourceCommit?: string;
+  /**
+   * Git-confirmed unmerged paths for CONFLICT items (M19.3; mirrors the
+   * reason text structurally). Absent otherwise.
+   */
+  readonly conflictFiles?: readonly string[];
+  /**
+   * True when the worker branch contained no changes over the integration
+   * base (M19.3; the staged-empty halt). Drives the EMPTY_MERGE triage
+   * finding. Absent (never false) otherwise — absence is not evidence.
+   */
+  readonly emptyMerge?: boolean;
+  /** Git exit code for git-command MERGE_FAILED items (M19.3). */
+  readonly gitExitCode?: number | null;
+  /** Bounded git stderr for git-command MERGE_FAILED items (M19.3). */
+  readonly gitStderr?: string;
 }
 
 export interface MergeTrainResult {
@@ -150,6 +177,16 @@ export interface MergeTrainResult {
   readonly baseCommit: string;
   readonly finalCommit: string;
   readonly items: IntegratedItem[];
+  /**
+   * Wall-clock ms for the whole train run (M19.1). Always set by
+   * runMergeTrain; optional for compatibility.
+   */
+  readonly durationMs?: number | null;
+  /**
+   * Cumulative test command used for the train gates, echoed from input
+   * (M19.3). Absent when the caller let each worktree resolve its own.
+   */
+  readonly testCommand?: readonly string[];
   readonly haltReason?: string;
   readonly approval: {
     readonly id: string;

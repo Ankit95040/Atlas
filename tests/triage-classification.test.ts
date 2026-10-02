@@ -41,6 +41,32 @@ describe("triage classifier", () => {
     expect(classifications).toContain("GIT_CONFLICT");
   });
 
+  it("produces EMPTY_MERGE from a flagged empty merge (M19.3)", () => {
+    const { classifications, recommendedActions } = classifyTriageFindings({
+      conflictFiles: [],
+      ownership: [],
+      claimOverlap: [],
+      dependencyLinks: [],
+      semanticFlags: [],
+      emptyMerges: ["task-empty"],
+    });
+    expect(classifications).toContain("EMPTY_MERGE");
+    expect(classifications).not.toContain("GIT_CONFLICT");
+    expect(recommendedActions.length).toBeGreaterThan(0);
+  });
+
+  it("does not produce EMPTY_MERGE without a flag", () => {
+    const { classifications } = classifyTriageFindings({
+      conflictFiles: [],
+      ownership: [],
+      claimOverlap: [],
+      dependencyLinks: [],
+      semanticFlags: [],
+    });
+    expect(classifications).not.toContain("EMPTY_MERGE");
+    expect(classifications).toContain("UNKNOWN");
+  });
+
   it("does not produce GIT_CONFLICT without Git-confirmed files", () => {
     const { classifications } = classifyTriageFindings({
       conflictFiles: [],

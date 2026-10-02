@@ -3,7 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import { getPrismaClient } from "../db/client.js";
-import { recordTestRun, transitionTestRun } from "../core/service.js";
+import { recordEvent, recordTestRun, transitionTestRun } from "../core/service.js";
 import { NoTestCommandError, TestExecutionError } from "./errors.js";
 import { RunTestsInputSchema, type TestExecutionResult, type TestExecutionStatus } from "./types.js";
 
@@ -145,6 +145,20 @@ export async function runTests(
     db,
   );
   await transitionTestRun(testRun.id, "RUNNING", db);
+  // M19.5 lifecycle: test execution start. Feature scope is resolved for
+  // history queries; absence only drops the link, never the event.
+  const eventTask = await db.task.findUnique({ where: { id: input.taskId }, select: { featureId: true } });
+  const eventFeatureId = eventTask?.featureId;
+  await recordEvent(
+    {
+      type: "TEST_STARTED",
+      ...(eventFeatureId !== undefined ? { featureId: eventFeatureId } : {}),
+      taskId: input.taskId,
+      actor: "atlas-tests",
+      payload: { testRunId: testRun.id },
+    },
+    db,
+  );
 
   const startedAt = Date.now();
   let observed: ObservedProcess;
@@ -185,6 +199,20 @@ export async function runTests(
     },
   });
   await transitionTestRun(testRun.id, status, db);
+  // M19.5 lifecycle: terminal test outcome. CANCELLED (abort) emits nothing:
+  // an aborted run is neither pass nor fail evidence.
+  if (status === "PASSED" || status === "FAILED") {
+    await recordEvent(
+      {
+        type: status === "PASSED" ? "TEST_PASSED" : "TEST_FAILED",
+        ...(eventFeatureId !== undefined ? { featureId: eventFeatureId } : {}),
+        taskId: input.taskId,
+        actor: "atlas-tests",
+        payload: { testRunId: testRun.id, exitCode: observed.exitCode },
+      },
+      db,
+    );
+  }
 
   return {
     testRunId: testRun.id,

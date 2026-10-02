@@ -509,12 +509,22 @@ pnpm build
 ```sh
 pnpm atlas -- --help
 pnpm atlas -- doctor
+pnpm atlas -- init --name <project> --repo-path <git-checkout> --feature-title <title>
 pnpm atlas -- plan --feature <featureId> --proposal proposal.json [--approve --actor <name>]
 pnpm atlas -- run --feature <featureId> --repository <repoId> --plan-approval <approvalId> --actor <name> --agent <exe> [--agent-arg <arg> ...] --approve-merge
+pnpm atlas -- status <featureId>
+pnpm atlas -- show run <featureId> | show task <taskId> | show worker <workerId>
+pnpm atlas -- history <featureId> | claims <featureId> | diagnose <featureId>
+pnpm atlas -- recover task <taskId> --actor <name>
+pnpm atlas -- task transition <taskId> --to <status> --actor <name> --reason <text>
 # after `pnpm build`, the local bin also works:
 ./node_modules/.bin/atlas --help
 ./node_modules/.bin/atlas doctor
 ```
+
+New here? Start with `docs/GETTING_STARTED.md` (clean machine to first
+run), and keep `docs/RECOVERY_RUNBOOK.md` nearby when operating real runs
+(failure taxonomy, `recover`, `task transition`, what never to do).
 
 `atlas doctor` checks:
 

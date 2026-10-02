@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { NotFoundError } from "../src/core/errors.js";
@@ -261,6 +261,69 @@ describe("execution verification", () => {
     await trackVerificationRecords(ctx.taskId);
     expect(result.verdict).toBe("REJECTED");
     expect(result.reasons).toEqual(["WORKSPACE_INVALID"]);
+  });
+
+  it("distinguishes a valid empty workspace (VERIFIED) from failed verification (M19.4)", async () => {
+    const repoDir = await initTempRepo();
+    const project = await createProject({ name: uniqueName("verify-empty-proj") });
+    track("project", project.id);
+    const repository = await createRepository({ projectId: project.id, name: "main", localPath: repoDir });
+    track("repository", repository.id);
+    const feature = await createFeature({ projectId: project.id, title: "feat-empty" });
+    track("feature", feature.id);
+    const pending = await createTask({ featureId: feature.id, title: "task-empty" });
+    track("task", pending.id);
+    const ready = await transitionTask(pending.id, "READY");
+    await createTaskClaims({ taskId: ready.id, claims: [{ resource: "src/a.ts", access: "WRITE" }] });
+    const worker = await createWorker({});
+    track("worker", worker.id);
+    const approval = await createApproval({ taskId: ready.id });
+    track("approval", approval.id);
+    await decideApproval(approval.id, { decision: "APPROVED", actor: "tester" });
+    const scratch = await makeTempDir();
+    const assignment = await assignTaskToWorker({
+      taskId: ready.id,
+      workerId: worker.id,
+      repositoryId: repository.id,
+      workspaceRoot: trackTempPath(`${scratch}/wsroot`),
+    });
+    track("workspace", assignment.workspace.id);
+
+    // Empty workspace, no modifications: valid hygiene, not a failure.
+    const run = await runTests(
+      { taskId: ready.id, workdir: assignment.workspace.path, command: [NODE, "--eval", "process.exit(0);"] },
+      db,
+    );
+    track("testRun", run.testRunId);
+    const empty = await verifyExecution(
+      {
+        taskId: ready.id,
+        workerId: worker.id,
+        expectedBaseCommit: assignment.worktree.commit,
+        testRunId: run.testRunId,
+      },
+      db,
+    );
+    await trackVerificationRecords(ready.id);
+    expect(empty.verdict).toBe("VERIFIED");
+    expect(empty.reasons).toEqual([]);
+    expect(empty.changedResources).toEqual([]);
+
+    // Same workspace with an undeclared modification: genuine failure.
+    await mkdir(join(assignment.workspace.path, "src"), { recursive: true });
+    await writeFile(join(assignment.workspace.path, "src/evil.ts"), "x\n");
+    const tampered = await verifyExecution(
+      {
+        taskId: ready.id,
+        workerId: worker.id,
+        expectedBaseCommit: assignment.worktree.commit,
+        testRunId: run.testRunId,
+      },
+      db,
+    );
+    await trackVerificationRecords(ready.id);
+    expect(tampered.verdict).toBe("REJECTED");
+    expect(tampered.reasons).toContain("CLAIM_VIOLATION");
   });
 
   it("is deterministic across repeated evaluations", async () => {

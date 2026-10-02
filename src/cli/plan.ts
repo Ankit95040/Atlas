@@ -7,6 +7,7 @@ import {
   createTask,
   createTaskDependency,
   decideApproval,
+  recordEvent,
   transitionTask,
 } from "../core/service.js";
 import { createTaskClaims } from "../claims/index.js";
@@ -166,6 +167,18 @@ export async function runPlanCommand(
       await createTaskDependency({ taskId, dependsOnTaskId }, db);
     }
     persistedTaskIds = validated.tasks.map((task) => proposalIdToTaskId.get(task.id) as string);
+
+    // M19.5 lifecycle: a new plan was persisted (reuse path above emits
+    // nothing — re-running the same proposal is not a new plan).
+    await recordEvent(
+      {
+        type: "PLAN_CREATED",
+        featureId: feature.id,
+        actor: options.actor ?? "atlas-cli-plan",
+        payload: { tasks: persistedTaskIds.length, proposalSha256: hash.slice(0, 12) },
+      },
+      db,
+    );
 
     const created = await createApproval(
       { featureId: feature.id, context: PLAN_APPROVAL_CONTEXT, note: approvalNoteFor(hash) },

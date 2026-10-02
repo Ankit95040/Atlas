@@ -2,18 +2,20 @@ import { realpath } from "node:fs/promises";
 import type { PrismaClient, Task, Worker, Workspace } from "@prisma/client";
 import { getPrismaClient } from "../db/client.js";
 import { InvariantViolationError, NotFoundError } from "../core/errors.js";
-import { recordArtifact, recordEvent, transitionTask, transitionWorker } from "../core/service.js";
+import { recordArtifact, recordEvent, releaseWorkerAssignment, transitionTask, transitionWorker } from "../core/service.js";
 import { TASK_TRANSITIONS, WORKER_TRANSITIONS, assertTransition } from "../core/transitions.js";
 import { resourceOverlaps } from "../claims/conflicts.js";
 import type { NormalizedClaim } from "../claims/types.js";
 import { getTaskClaims } from "../claims/service.js";
 import { getCurrentCommit, getRepositoryRoot, getWorktree } from "../git/index.js";
 import { getWorktreeChanges } from "../git/diff.js";
+import { CommandFailureError } from "./command-provider.js";
 import type { WorkerProvider } from "./provider.js";
 import {
   ExecuteTaskInput,
   ProviderOutputSchema,
   type ChangedResource,
+  type CommandFailureKind,
   type WorkerExecutionInput,
   type WorkerExecutionResult,
 } from "./types.js";
@@ -30,11 +32,12 @@ interface ExecutionContext {
 interface TerminalOutcome {
   readonly status: Extract<
     WorkerExecutionResult["status"],
-    "COMPLETED" | "FAILED" | "CLAIM_VIOLATION"
+    "COMPLETED" | "COMPLETED_EMPTY" | "FAILED" | "CLAIM_VIOLATION"
   >;
   readonly workerTo: "COMPLETED" | "FAILED";
-  readonly taskTo: "VERIFICATION" | "FAILED";
+  readonly taskTo: "VERIFICATION" | "COMPLETED_EMPTY" | "FAILED";
   readonly error?: string;
+  readonly errorCode?: CommandFailureKind;
   readonly providerSummary?: string;
 }
 
@@ -195,6 +198,11 @@ export async function executeTask(
   try {
     rawOutput = await provider.execute(providerInput);
   } catch (error) {
+    // Structured spawn evidence travels alongside the message (M19.2);
+    // non-command failures carry no code, exactly as before.
+    if (error instanceof CommandFailureError) {
+      return failExecution(db, terminalContext(task, worker, workspace, actualHead), errorMessage(error), error.kind);
+    }
     return failExecution(db, terminalContext(task, worker, workspace, actualHead), errorMessage(error));
   }
   const parsed = ProviderOutputSchema.safeParse(rawOutput);
@@ -249,6 +257,18 @@ export async function executeTask(
       providerSummary: parsed.data.summary,
     });
   }
+  // M19.4 Policy 3: valid execution hygiene with an empty effective diff is
+  // a distinct observed outcome (COMPLETED_EMPTY), neither ordinary success
+  // (COMPLETED, which claims a contribution) nor failure. The worker did its
+  // job (workerTo COMPLETED); the task carries no contribution.
+  if (changedResources.length === 0) {
+    return finishExecution(db, terminalContext(task, worker, workspace, actualHead, finalCommit, changedResources, undeclared), {
+      status: "COMPLETED_EMPTY",
+      workerTo: "COMPLETED",
+      taskTo: "COMPLETED_EMPTY",
+      providerSummary: parsed.data.summary,
+    });
+  }
   return finishExecution(db, terminalContext(task, worker, workspace, actualHead, finalCommit, changedResources, undeclared), {
     status: "COMPLETED",
     workerTo: "COMPLETED",
@@ -295,8 +315,15 @@ async function failExecution(
   db: PrismaClient,
   ctx: TerminalContext,
   error: string,
+  errorCode?: CommandFailureKind,
 ): Promise<WorkerExecutionResult> {
-  return finishExecution(db, ctx, { status: "FAILED", workerTo: "FAILED", taskTo: "FAILED", error });
+  return finishExecution(db, ctx, {
+    status: "FAILED",
+    workerTo: "FAILED",
+    taskTo: "FAILED",
+    error,
+    ...(errorCode !== undefined ? { errorCode } : {}),
+  });
 }
 
 /**
@@ -308,13 +335,41 @@ async function finishExecution(
   db: PrismaClient,
   ctx: TerminalContext,
   outcome: {
-    status: "COMPLETED" | "FAILED" | "CLAIM_VIOLATION";
+    status: "COMPLETED" | "COMPLETED_EMPTY" | "FAILED" | "CLAIM_VIOLATION";
     workerTo: "COMPLETED" | "FAILED";
-    taskTo: "VERIFICATION" | "FAILED";
+    taskTo: "VERIFICATION" | "COMPLETED_EMPTY" | "FAILED";
     error?: string;
+    errorCode?: CommandFailureKind;
     providerSummary?: string;
   },
 ): Promise<WorkerExecutionResult> {
+  // M19.5 lifecycle: the authoritative task outcome. COMPLETED_EMPTY records
+  // as TASK_COMPLETED with the distinct outcome (valid hygiene, no
+  // contribution); FAILED and CLAIM_VIOLATION record as TASK_FAILED.
+  // M20.3 persistence: failures additionally carry the structured error code
+  // (when the failure came from the command boundary), a bounded error
+  // summary, and the execution phase — the diagnostic evidence base runs and
+  // `atlas diagnose` read back, so a dead worker's cause survives its process.
+  const failed = outcome.status === "FAILED" || outcome.status === "CLAIM_VIOLATION";
+  await recordEvent(
+    {
+      type: failed ? "TASK_FAILED" : "TASK_COMPLETED",
+      featureId: ctx.task.featureId,
+      taskId: ctx.task.id,
+      actor: "atlas-worker-runtime",
+      payload: {
+        outcome: outcome.status,
+        workerId: ctx.worker.id,
+        // Phase is unconditional on failure events: finishExecution only runs
+        // for terminal execution outcomes, so a TASK_FAILED row always means
+        // the worker-execution phase ended in failure.
+        ...(failed ? { phase: "worker-execution" as const } : {}),
+        ...(outcome.errorCode !== undefined ? { errorCode: outcome.errorCode } : {}),
+        ...(outcome.error !== undefined ? { error: outcome.error.slice(0, 2000) } : {}),
+      },
+    },
+    db,
+  );
   const artifact = await recordArtifact(
     {
       taskId: ctx.task.id,
@@ -331,6 +386,15 @@ async function finishExecution(
     await transitionWorker(ctx.worker.id, "FAILED", db);
   }
   await transitionTask(ctx.task.id, outcome.taskTo, db);
+  if (outcome.taskTo === "FAILED") {
+    // M23.1: the task is no longer worker-owned and the worker is terminal,
+    // so the current-assignment link is released here, atomically with the
+    // failure recording. The worker stays FAILED (historically terminal, not
+    // reusable); history survives via TASK_FAILED payloads, artifacts, and
+    // events. VERIFICATION and COMPLETED_EMPTY outcomes keep the link: the
+    // merge train re-verifies through it before integrating.
+    await releaseWorkerAssignment(ctx.worker.id, db);
+  }
   return {
     taskId: ctx.task.id,
     workerId: ctx.worker.id,
@@ -342,6 +406,7 @@ async function finishExecution(
     undeclaredResources: ctx.undeclared,
     artifacts: { summaryArtifactId: artifact.id },
     ...(outcome.error !== undefined ? { error: outcome.error } : {}),
+    ...(outcome.errorCode !== undefined ? { errorCode: outcome.errorCode } : {}),
     ...(outcome.providerSummary !== undefined ? { providerSummary: outcome.providerSummary } : {}),
   };
 }

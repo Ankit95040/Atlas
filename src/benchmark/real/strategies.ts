@@ -18,7 +18,7 @@ import { assignTaskToWorker } from "../../workspaces/index.js";
 import { executeTask, type WorkerExecutionResult } from "../../workers/index.js";
 import { runMergeTrain, runTests, verifyExecution } from "../../verification/index.js";
 import type { MergeTrainResult, TestExecutionResult, VerificationResult } from "../../verification/index.js";
-import { runFeatureWaveLoop } from "../../orchestrator/index.js";
+import { runFeatureWaveLoop, type TaskOutcome } from "../../orchestrator/index.js";
 import { triageIntegrationHalt } from "../../triage/index.js";
 import { BenchmarkError } from "../errors.js";
 import { ConcurrencyTracker } from "../strategies.js";
@@ -45,11 +45,27 @@ export interface RealExecutedTask {
   readonly testRun: TestExecutionResult | null;
   readonly verification: VerificationResult | null;
   /**
-   * Measured worker time where the arm observes it (SINGLE/DUMB). Null for
-   * the ATLAS arm: the shipped loop does not expose per-task timing, and
-   * M14 will not invent it.
+   * Measured worker time where the arm observes it (SINGLE/DUMB, and ATLAS
+   * arms since M19.1, which preserves the loop-measured TaskOutcome.workerMs).
+   * Null only when the underlying outcome carries no measurement.
    */
   readonly workerMs: number | null;
+}
+
+/**
+ * Map one wave-loop outcome onto the benchmark's executed-task record,
+ * preserving the loop-measured workerMs (M19.1) instead of nulling it.
+ */
+export function toRealExecutedTask(outcome: TaskOutcome, key: string): RealExecutedTask {
+  return {
+    key,
+    taskId: outcome.taskId,
+    workerId: outcome.workerId,
+    execution: outcome.execution,
+    testRun: outcome.testRun,
+    verification: outcome.verification,
+    workerMs: outcome.workerMs ?? null,
+  };
 }
 
 export interface RealSchedulingRecord {
@@ -464,15 +480,9 @@ export async function runRealAtlas(ctx: RealStrategyContext): Promise<RealStrate
     },
     ctx.db,
   );
-  const executed: RealExecutedTask[] = loop.outcomes.map((outcome) => ({
-    key: idToKey.get(outcome.taskId) ?? outcome.taskId,
-    taskId: outcome.taskId,
-    workerId: outcome.workerId,
-    execution: outcome.execution,
-    testRun: outcome.testRun,
-    verification: outcome.verification,
-    workerMs: null,
-  }));
+  const executed: RealExecutedTask[] = loop.outcomes.map((outcome) =>
+    toRealExecutedTask(outcome, idToKey.get(outcome.taskId) ?? outcome.taskId),
+  );
   const atlasOrder = loop.waves.flat().map(toKey);
   // Observed concurrency: executed wave width. Waves run concurrently inside
   // the loop, so the widest executed wave is the measured peak.
@@ -564,15 +574,9 @@ export async function runRealAtlasEvolving(ctx: RealStrategyContext): Promise<Re
     },
     ctx.db,
   );
-  const executed: RealExecutedTask[] = loop.outcomes.map((outcome) => ({
-    key: idToKey.get(outcome.taskId) ?? outcome.taskId,
-    taskId: outcome.taskId,
-    workerId: outcome.workerId,
-    execution: outcome.execution,
-    testRun: outcome.testRun,
-    verification: outcome.verification,
-    workerMs: null,
-  }));
+  const executed: RealExecutedTask[] = loop.outcomes.map((outcome) =>
+    toRealExecutedTask(outcome, idToKey.get(outcome.taskId) ?? outcome.taskId),
+  );
   const atlasOrder = loop.waves.flat().map(toKey);
   const peakConcurrency = loop.waves.reduce((peak, wave) => Math.max(peak, wave.length), 0);
   return {

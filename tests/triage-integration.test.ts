@@ -326,7 +326,11 @@ describe("integration triage", () => {
     expect(result.train?.status).toBe("HALTED");
     const triage = result.triage as NonNullable<typeof result.triage>;
     const ownerId = triage.ownership[0]?.owners[0] as string;
-    const ownerWorker = await db.worker.findFirstOrThrow({ where: { taskId: ownerId } });
+    // M23.1: links release at INTEGRATED — resolve the owner through event
+    // history, the same rule triage itself uses.
+    const assigned = await db.event.findFirstOrThrow({ where: { taskId: ownerId, type: "WORKER_ASSIGNED" } });
+    const ownerWorkerId = (JSON.parse(assigned.payload ?? "{}") as { workerId: string }).workerId;
+    const ownerWorker = await db.worker.findUniqueOrThrow({ where: { id: ownerWorkerId } });
 
     // Simulate lost provenance: the owner's worker link is gone. Triage must
     // report unknown ownership, not attribute the file to someone else.

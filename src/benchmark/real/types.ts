@@ -144,7 +144,7 @@ const realTaskRecordSchema = z.object({
   key: z.string(),
   taskId: z.string(),
   workerId: z.string(),
-  status: z.enum(["COMPLETED", "FAILED", "CLAIM_VIOLATION", "INVALID_WORKSPACE", "NOT_AUTHORIZED", "BASE_COMMIT_MISMATCH"]),
+  status: z.enum(["COMPLETED", "COMPLETED_EMPTY", "FAILED", "CLAIM_VIOLATION", "INVALID_WORKSPACE", "NOT_AUTHORIZED", "BASE_COMMIT_MISMATCH"]),
   /** Null for arms whose loop does not expose per-task timing (ATLAS). Never estimated. */
   workerMs: z.number().nullable(),
   verification: z.enum(["VERIFIED", "REJECTED", "NOT_EVALUATED"]),
@@ -163,7 +163,7 @@ const realIntegrationRecordSchema = z.object({
   items: z.array(
     z.object({
       key: z.string(),
-      status: z.enum(["INTEGRATED", "CONFLICT", "TESTS_FAILED", "VERIFICATION_FAILED", "MERGE_FAILED", "NOT_ATTEMPTED"]),
+      status: z.enum(["INTEGRATED", "CONFLICT", "TESTS_FAILED", "VERIFICATION_FAILED", "MERGE_FAILED", "SKIPPED_EMPTY", "NOT_ATTEMPTED"]),
     }),
   ),
   order: z.array(z.string()),

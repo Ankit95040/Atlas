@@ -30,11 +30,17 @@ export interface ClassifyTriageFindingsInput {
   readonly claimOverlap: ReadonlyArray<{ taskA: string; taskB: string }>;
   readonly dependencyLinks: readonly unknown[];
   readonly semanticFlags: readonly unknown[];
+  /**
+   * Task IDs the merge train flagged as empty merges (M19.3). Optional so
+   * previously constructed inputs still typecheck; absent means no flag.
+   */
+  readonly emptyMerges?: readonly string[];
 }
 
 const ACTION_FOR: Record<TriageClassification, readonly TriageAction[]> = {
   GIT_CONFLICT: ["review-conflicting-files", "revise-one-implementation"],
   CLAIM_CONFLICT: ["revise-claims", "split-shared-resources"],
+  EMPTY_MERGE: ["inspect-train-worktree", "replan-or-abandon"],
   DEPENDENCY_ORDERING: ["review-task-ordering", "add-dependency-edge"],
   SEMANTIC_RISK: ["human-review-required"],
   UNKNOWN: ["inspect-train-worktree", "replan-or-abandon"],
@@ -52,6 +58,9 @@ export function classifyTriageFindings(input: ClassifyTriageFindingsInput): {
   const found = new Set<TriageClassification>();
   if (input.conflictFiles.length > 0) {
     found.add("GIT_CONFLICT");
+  }
+  if ((input.emptyMerges ?? []).length > 0) {
+    found.add("EMPTY_MERGE");
   }
   if (input.claimOverlap.length > 0) {
     found.add("CLAIM_CONFLICT");
@@ -288,6 +297,7 @@ export async function triageIntegrationHalt(
     claimOverlap,
     dependencyLinks,
     semanticFlags,
+    emptyMerges: input.items.filter((item) => item.emptyMerge === true).map((item) => item.taskId),
   });
 
   const mergeCommits = integrated

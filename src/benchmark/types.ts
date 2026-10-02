@@ -117,6 +117,7 @@ export type ScenarioTaskSpec = z.infer<typeof scenarioTaskSpecSchema>;
 
 const workerExecutionStatusSchema = z.enum([
   "COMPLETED",
+  "COMPLETED_EMPTY",
   "FAILED",
   "CLAIM_VIOLATION",
   "INVALID_WORKSPACE",
@@ -148,7 +149,7 @@ const integrationRecordSchema = z.object({
   items: z.array(
     z.object({
       key: z.string(),
-      status: z.enum(["INTEGRATED", "CONFLICT", "TESTS_FAILED", "VERIFICATION_FAILED", "MERGE_FAILED", "NOT_ATTEMPTED"]),
+      status: z.enum(["INTEGRATED", "CONFLICT", "TESTS_FAILED", "VERIFICATION_FAILED", "MERGE_FAILED", "SKIPPED_EMPTY", "NOT_ATTEMPTED"]),
     }),
   ),
   /** Effective merge-train processing order: keys in sequence-used order (stable, deterministic). */

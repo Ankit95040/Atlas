@@ -21,6 +21,7 @@ import { assignTaskToWorker } from "../src/workspaces/index.js";
 import { FakePlannerProvider, runPlanner } from "../src/planner/index.js";
 import { planSchedule } from "../src/dag/index.js";
 import {
+  CommandFailureError,
   FakeWorkerProvider,
   executeTask,
   type WorkerExecutionInput,
@@ -398,7 +399,8 @@ describe("worker claim enforcement", () => {
       new FakeWorkerProvider(),
     );
     await trackExecutionRecords(ctx.task.id);
-    expect(result.status).toBe("COMPLETED");
+    // M19.4 Policy 3: valid hygiene with no effective diff is COMPLETED_EMPTY.
+    expect(result.status).toBe("COMPLETED_EMPTY");
     expect(result.changedResources).toEqual([]);
     expect(result.undeclaredResources).toEqual([]);
   });
@@ -561,7 +563,9 @@ describe("worker provider boundary", () => {
       sneaky,
     );
     await trackExecutionRecords(ctx.task.id);
-    expect(result.status).toBe("COMPLETED");
+    // M19.4 Policy 3: nothing changed in the worktree, so the valid run is
+    // COMPLETED_EMPTY; isolation assertions below are unaffected.
+    expect(result.status).toBe("COMPLETED_EMPTY");
     expect(result.changedResources).toEqual([]);
     expect(result.workspaceId).toBe(ctx.workspace.id);
     expect(await isClean(ctx.workspacePath)).toBe(true);
@@ -606,7 +610,9 @@ describe("worker provider boundary", () => {
       spy,
     );
     await trackExecutionRecords(ctx.task.id);
-    expect(result.status).toBe("COMPLETED");
+    // M19.4 Policy 3: the spy changes nothing, so the valid run is
+    // COMPLETED_EMPTY; input-shape assertions below are unaffected.
+    expect(result.status).toBe("COMPLETED_EMPTY");
     const record = seen as Record<string, unknown>;
     const allowed = new Set([
       "taskId",
@@ -737,5 +743,86 @@ describe("planner to runtime integration", () => {
     expect(result.artifacts?.summaryArtifactId).toMatch(/.+/);
     expect(await getCurrentCommit(repoDir)).toBe(headBefore);
     expect(await getCurrentBranch(repoDir)).toBe("main");
+  });
+});
+
+describe("empty-diff completion policy (M19.4 Policy 3)", () => {
+  it("returns COMPLETED_EMPTY for valid execution with no effective diff", async () => {
+    const repoDir = await initTempRepo();
+    const ctx = await setupExecution("empty", repoDir, [{ resource: "src/a.txt", access: "WRITE" }]);
+    const result = await executeTask(
+      { taskId: ctx.task.id, workerId: ctx.worker.id, expectedBaseCommit: ctx.baseCommit },
+      new FakeWorkerProvider({}),
+    );
+    await trackExecutionRecords(ctx.task.id);
+
+    expect(result.status).toBe("COMPLETED_EMPTY");
+    expect(result.changedResources).toEqual([]);
+    expect(result.undeclaredResources).toEqual([]);
+    expect(result.error).toBeUndefined();
+    // Hygiene valid: the worker completed its assignment; the task carries
+    // the distinct empty outcome instead of ordinary success.
+    expect((await db.worker.findUniqueOrThrow({ where: { id: ctx.worker.id } })).status).toBe("COMPLETED");
+    expect((await db.task.findUniqueOrThrow({ where: { id: ctx.task.id } })).status).toBe("COMPLETED_EMPTY");
+    expect(await getCurrentCommit(repoDir)).toBe(ctx.baseCommit);
+  });
+
+  it("returns existing COMPLETED for valid execution with a non-empty diff", async () => {
+    const repoDir = await initTempRepo();
+    const ctx = await setupExecution("nonempty", repoDir, [{ resource: "src/a.txt", access: "WRITE" }]);
+    const result = await executeTask(
+      { taskId: ctx.task.id, workerId: ctx.worker.id, expectedBaseCommit: ctx.baseCommit },
+      new FakeWorkerProvider({ files: { "src/a.txt": "x\n" } }),
+    );
+    await trackExecutionRecords(ctx.task.id);
+
+    expect(result.status).toBe("COMPLETED");
+    expect(result.changedResources).toEqual([{ path: "src/a.txt", change: "ADDED" }]);
+    expect((await db.task.findUniqueOrThrow({ where: { id: ctx.task.id } })).status).toBe("VERIFICATION");
+  });
+
+  it("propagates structured provider failures and persists the evidence (M20.3)", async () => {
+    const repoDir = await initTempRepo();
+    const ctx = await setupExecution("proberror", repoDir, [{ resource: "src/a.txt", access: "WRITE" }]);
+    const throwing = {
+      execute: async (): Promise<unknown> => {
+        throw new CommandFailureError("RATE_LIMIT", {
+          executable: "opencode",
+          message: "command-worker: command failed: command exited with code 1: Rate limit exceeded",
+        });
+      },
+    };
+    const result = await executeTask(
+      { taskId: ctx.task.id, workerId: ctx.worker.id, expectedBaseCommit: ctx.baseCommit },
+      throwing,
+    );
+    await trackExecutionRecords(ctx.task.id);
+
+    expect(result.status).toBe("FAILED");
+    expect(result.errorCode).toBe("RATE_LIMIT");
+    // Persisted TASK_FAILED event carries code, summary, and phase for later reads.
+    const rows = await db.event.findMany({ where: { taskId: ctx.task.id, type: "TASK_FAILED" } });
+    expect(rows).toHaveLength(1);
+    const payload = JSON.parse((rows[0]?.payload ?? "{}") as string) as Record<string, unknown>;
+    expect(payload["errorCode"]).toBe("RATE_LIMIT");
+    expect(payload["phase"]).toBe("worker-execution");
+    expect(payload["error"]).toContain("Rate limit exceeded");
+    expect(payload["workerId"]).toBe(ctx.worker.id);
+    // Read back through a fresh query path, as diagnose does.
+    const reread = await db.event.findMany({ where: { taskId: ctx.task.id, type: "TASK_FAILED" } });
+    expect(reread).toHaveLength(1);
+  });
+
+  it("keeps invalid behavior unchanged (FAILED, never COMPLETED_EMPTY)", async () => {
+    const repoDir = await initTempRepo();
+    const ctx = await setupExecution("stillbad", repoDir, [{ resource: "src/a.txt", access: "WRITE" }]);
+    const result = await executeTask(
+      { taskId: ctx.task.id, workerId: ctx.worker.id, expectedBaseCommit: ctx.baseCommit },
+      new FakeWorkerProvider({ failWith: "model exploded" }),
+    );
+    await trackExecutionRecords(ctx.task.id);
+
+    expect(result.status).toBe("FAILED");
+    expect((await db.task.findUniqueOrThrow({ where: { id: ctx.task.id } })).status).toBe("FAILED");
   });
 });

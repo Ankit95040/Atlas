@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import { getPrismaClient } from "../db/client.js";
 import { getCurrentCommit, validateRepository } from "../git/index.js";
-import { createApproval, decideApproval } from "../core/service.js";
+import { createApproval, decideApproval, recordEvent } from "../core/service.js";
 import { runFeatureWaveLoop } from "../orchestrator/index.js";
 import { CommandWorkerProvider } from "../workers/index.js";
 import { EXIT_HALTED, EXIT_OK, type CommandOutput } from "./output.js";
@@ -114,28 +114,44 @@ export async function runRunCommand(
 
   const agentCommand = [options.agent, ...(options.agentArg ?? [])];
   const testCommand = options.testCommand === undefined ? undefined : [options.testCommand, ...(options.testArg ?? [])];
-  const result = await runFeatureWaveLoop(
-    {
-      featureId: feature.id,
-      repositoryId: repository.id,
-      baseCommit,
-      workspaceRoot,
-      trainBranch,
-      trainPath,
-      approvalActor: options.actor,
-      maxConcurrency: options.maxConcurrency ?? 4,
-      ...(testCommand !== undefined ? { testCommand } : {}),
-    },
-    {
-      createProvider: () =>
-        new CommandWorkerProvider({
-          command: agentCommand,
-          ...(options.agentTimeoutMs !== undefined ? { timeoutMs: options.agentTimeoutMs } : {}),
-          ...(options.agentEnv !== undefined ? { envAllowlist: [...options.agentEnv] } : {}),
-        }),
-    },
-    db,
-  );
+  let result: Awaited<ReturnType<typeof runFeatureWaveLoop>>;
+  try {
+    result = await runFeatureWaveLoop(
+      {
+        featureId: feature.id,
+        repositoryId: repository.id,
+        baseCommit,
+        workspaceRoot,
+        trainBranch,
+        trainPath,
+        approvalActor: options.actor,
+        maxConcurrency: options.maxConcurrency ?? 4,
+        ...(testCommand !== undefined ? { testCommand } : {}),
+      },
+      {
+        createProvider: () =>
+          new CommandWorkerProvider({
+            command: agentCommand,
+            ...(options.agentTimeoutMs !== undefined ? { timeoutMs: Number(options.agentTimeoutMs) } : {}),
+            ...(options.agentEnv !== undefined ? { envAllowlist: [...options.agentEnv] } : {}),
+          }),
+      },
+      db,
+    );
+  } catch (error) {
+    // M19.5 lifecycle: the run itself crashed (per-task failures live in
+    // outcomes, not here). Rethrow unchanged: exit-code behavior is identical.
+    await recordEvent(
+      {
+        type: "RUN_FAILED",
+        featureId: feature.id,
+        actor: options.actor,
+        payload: { error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) },
+      },
+      db,
+    );
+    throw error;
+  }
 
   const allClean =
     result.train?.status === "COMPLETED" &&

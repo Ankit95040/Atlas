@@ -2,6 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import { getPrismaClient } from "../db/client.js";
 import { NotFoundError } from "../core/errors.js";
 import {
+  GitCommandError,
   assertValidBranchName,
   createWorktree,
   getCurrentCommit,
@@ -10,7 +11,7 @@ import {
   runGit,
   validateRepository,
 } from "../git/index.js";
-import { recordArtifact, recordCommit } from "../core/service.js";
+import { recordArtifact, recordCommit, recordEvent, releaseWorkerAssignment } from "../core/service.js";
 import { runTests } from "./tests.js";
 import { MergeTrainNotApprovedError } from "./errors.js";
 import { MergeTrainInputSchema, type IntegratedItem, type MergeTrainResult } from "./types.js";
@@ -117,6 +118,19 @@ export async function runMergeTrain(
     throw new NotFoundError("Repository", input.repositoryId);
   }
   const root = await validateRepository(repository.localPath);
+  // M19.5 lifecycle: integration start. Feature scope is resolved best-effort
+  // from the first item for history queries; absence only drops the link.
+  const firstTask = await db.task.findUnique({ where: { id: input.items[0]?.taskId ?? "" } });
+  const eventFeatureId = firstTask?.featureId;
+  await recordEvent(
+    {
+      type: "INTEGRATION_STARTED",
+      ...(eventFeatureId !== undefined ? { featureId: eventFeatureId } : {}),
+      actor: "atlas-merge-train",
+      payload: { trainBranch: input.trainBranch, items: input.items.length },
+    },
+    db,
+  );
 
   const items = [...input.items].sort((a, b) => {
     const seqA = a.sequence ?? Number.POSITIVE_INFINITY;
@@ -135,8 +149,18 @@ export async function runMergeTrain(
 
   const integrated: IntegratedItem[] = [];
   let haltReason: string | undefined;
+  const trainStart = Date.now();
 
   for (const item of items) {
+    const itemStart = Date.now();
+    // Worker branch HEAD once resolved below; stamped onto every later push
+    // so records identify exactly what was merged or failed to merge.
+    let sourceCommit: string | null = null;
+    const stamp = (entry: Omit<IntegratedItem, "durationMs" | "sourceCommit">): IntegratedItem => ({
+      ...entry,
+      durationMs: Date.now() - itemStart,
+      ...(sourceCommit !== null ? { sourceCommit } : {}),
+    });
     const verification = await verifyExecution(
       {
         taskId: item.taskId,
@@ -147,12 +171,12 @@ export async function runMergeTrain(
       db,
     );
     if (verification.verdict !== "VERIFIED") {
-      integrated.push({
+      integrated.push(stamp({
         taskId: item.taskId,
         workerId: item.workerId,
         status: "VERIFICATION_FAILED",
         reason: verification.reasons.join("; "),
-      });
+      }));
       haltReason = `task ${item.taskId}: verification failed (${verification.reasons.join("; ")})`;
       break;
     }
@@ -160,25 +184,29 @@ export async function runMergeTrain(
     const worker = await db.worker.findUniqueOrThrow({ where: { id: item.workerId }, include: { workspace: true } });
     const workerPath = worker.workspace?.path;
     if (workerPath === undefined || !(await isClean(workerPath))) {
-      integrated.push({
+      integrated.push(stamp({
         taskId: item.taskId,
         workerId: item.workerId,
         status: "VERIFICATION_FAILED",
         reason: "worker workspace has uncommitted changes; merges only move commits",
-      });
+      }));
       haltReason = `task ${item.taskId}: worker workspace has uncommitted changes`;
       break;
     }
     const workerInfo = await getWorktree(root, workerPath);
     if (workerInfo.branch === null) {
-      integrated.push({
+      integrated.push(stamp({
         taskId: item.taskId,
         workerId: item.workerId,
         status: "VERIFICATION_FAILED",
         reason: "worker worktree is detached; nothing mergeable to name",
-      });
+      }));
       haltReason = `task ${item.taskId}: worker worktree is detached`;
       break;
+    }
+    const workerHead = await getCurrentCommit(workerPath).catch(() => null);
+    if (workerHead !== null) {
+      sourceCommit = workerHead;
     }
 
     try {
@@ -187,20 +215,35 @@ export async function runMergeTrain(
       const conflicted = await unmergedPaths(worktree.path).catch(() => [] as string[]);
       await abortMerge(worktree.path);
       if (conflicted.length > 0) {
-        integrated.push({
+        integrated.push(stamp({
           taskId: item.taskId,
           workerId: item.workerId,
           status: "CONFLICT",
           reason: `merge conflicts in: ${conflicted.join(", ")}`,
-        });
+          conflictFiles: [...conflicted],
+        }));
+        // M19.5 lifecycle: per-item conflict evidence.
+        await recordEvent(
+          {
+            type: "MERGE_CONFLICT",
+            ...(eventFeatureId !== undefined ? { featureId: eventFeatureId } : {}),
+            taskId: item.taskId,
+            actor: "atlas-merge-train",
+            payload: { trainBranch: input.trainBranch, files: [...conflicted] },
+          },
+          db,
+        );
         haltReason = `task ${item.taskId}: merge conflicts in ${conflicted.join(", ")}`;
       } else {
-        integrated.push({
+        integrated.push(stamp({
           taskId: item.taskId,
           workerId: item.workerId,
           status: "MERGE_FAILED",
           reason: `merge failed: ${errorMessage(error)}`,
-        });
+          ...(error instanceof GitCommandError
+            ? { gitExitCode: error.exitCode, gitStderr: error.stderr.slice(0, 2000) }
+            : {}),
+        }));
         haltReason = `task ${item.taskId}: merge failed`;
       }
       break;
@@ -214,14 +257,21 @@ export async function runMergeTrain(
     // must halt truthfully here instead of crashing there.
     if ((await stagedPaths(worktree.path)).length === 0) {
       await abortMerge(worktree.path);
-      integrated.push({
+      // M19.4 Policy 3: an empty merge is an explicit skipped outcome, not a
+      // fatal halt — no fake commit or merge is created, evidence is
+      // preserved, and remaining eligible items continue through the train.
+      integrated.push(stamp({
         taskId: item.taskId,
         workerId: item.workerId,
-        status: "MERGE_FAILED",
-        reason: `worker branch ${workerInfo.branch} contains no changes over the integration base; nothing to integrate`,
-      });
-      haltReason = `task ${item.taskId}: worker branch contains no changes over the integration base`;
-      break;
+        status: "SKIPPED_EMPTY",
+        reason: `worker branch ${workerInfo.branch} contains no changes over the integration base; skipped without integration`,
+        emptyMerge: true,
+      }));
+      // M23.1: the train consumed this item terminally (no integration, no
+      // further verification), so the worker's current-assignment link is
+      // released. Status, workspace, commits, TestRuns, and events stay.
+      await releaseWorkerAssignment(item.workerId, db);
+      continue;
     }
     try {
       const testResult = await runTests(
@@ -235,24 +285,24 @@ export async function runMergeTrain(
       testRunId = testResult.testRunId;
       if (testResult.status !== "PASSED") {
         await abortMerge(worktree.path);
-        integrated.push({
+        integrated.push(stamp({
           taskId: item.taskId,
           workerId: item.workerId,
           status: "TESTS_FAILED",
           testRunId,
           reason: `cumulative tests ${testResult.status.toLowerCase()} (exit ${testResult.exitCode})`,
-        });
+        }));
         haltReason = `task ${item.taskId}: cumulative tests ${testResult.status.toLowerCase()}`;
         break;
       }
     } catch (error) {
       await abortMerge(worktree.path);
-      integrated.push({
+      integrated.push(stamp({
         taskId: item.taskId,
         workerId: item.workerId,
         status: "TESTS_FAILED",
         reason: `cumulative tests could not run: ${errorMessage(error)}`,
-      });
+      }));
       haltReason = `task ${item.taskId}: cumulative tests could not run`;
       break;
     }
@@ -281,7 +331,12 @@ export async function runMergeTrain(
       sha: mergeCommit,
       subject,
     });
-    integrated.push({ taskId: item.taskId, workerId: item.workerId, status: "INTEGRATED", mergeCommit, testRunId });
+    integrated.push(stamp({ taskId: item.taskId, workerId: item.workerId, status: "INTEGRATED", mergeCommit, testRunId }));
+    // M23.1: the live link carried this item through re-verification and the
+    // merge commit; integration is terminal for the association, so release
+    // the worker's current-assignment link. Worker stays terminal (history,
+    // not reusable); everything else is preserved.
+    await releaseWorkerAssignment(item.workerId, db);
   }
 
   for (const item of items) {
@@ -291,6 +346,20 @@ export async function runMergeTrain(
   }
   integrated.sort((a, b) => (a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0));
 
+  // M19.5 lifecycle: train outcome (COMPLETED or HALTED).
+  await recordEvent(
+    {
+      type: haltReason === undefined ? "INTEGRATION_COMPLETED" : "INTEGRATION_FAILED",
+      ...(eventFeatureId !== undefined ? { featureId: eventFeatureId } : {}),
+      actor: "atlas-merge-train",
+      payload: {
+        trainBranch: input.trainBranch,
+        status: haltReason === undefined ? "COMPLETED" : "HALTED",
+        ...(haltReason !== undefined ? { haltReason } : {}),
+      },
+    },
+    db,
+  );
   return {
     status: haltReason === undefined ? "COMPLETED" : "HALTED",
     trainBranch: input.trainBranch,
@@ -298,6 +367,8 @@ export async function runMergeTrain(
     baseCommit: input.baseCommit,
     finalCommit: await getCurrentCommit(worktree.path),
     items: integrated,
+    durationMs: Date.now() - trainStart,
+    ...(input.testCommand !== undefined ? { testCommand: [...input.testCommand] } : {}),
     ...(haltReason !== undefined ? { haltReason } : {}),
     approval: { id: approval.id, actor: approval.actor, decidedAt: approval.decidedAt },
   };

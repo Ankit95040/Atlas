@@ -17,7 +17,12 @@ import {
 } from "../src/core/service.js";
 import { createTaskClaims } from "../src/claims/index.js";
 import { assignTaskToWorker } from "../src/workspaces/index.js";
-import { CommandWorkerProvider, executeTask, type WorkerExecutionInput } from "../src/workers/index.js";
+import {
+  CommandFailureError,
+  CommandWorkerProvider,
+  executeTask,
+  type WorkerExecutionInput,
+} from "../src/workers/index.js";
 import { track, uniqueName } from "./domain-helpers.js";
 import { initTempRepo, makeTempDir } from "./git-helpers.js";
 
@@ -117,7 +122,8 @@ describe("command worker provider", () => {
     const setup = await setupTask([{ resource: "src/future.txt", access: "WRITE" }]);
     const { execution } = await runAgent(setup, []);
 
-    expect(execution.status).toBe("COMPLETED");
+    // M19.4 Policy 3: valid hygiene with no effective diff is COMPLETED_EMPTY.
+    expect(execution.status).toBe("COMPLETED_EMPTY");
     expect(execution.changedResources).toEqual([]);
     expect(execution.undeclaredResources).toEqual([]);
   }, 60000);
@@ -136,6 +142,7 @@ describe("command worker provider", () => {
 
     expect(execution.status).toBe("FAILED");
     expect(execution.error ?? "").toContain("command-worker");
+    expect(execution.errorCode).toBe("TIMEOUT");
   }, 60000);
 
   it("maps a non-zero command exit to a structured failure", async () => {
@@ -144,6 +151,7 @@ describe("command worker provider", () => {
 
     expect(execution.status).toBe("FAILED");
     expect(execution.error ?? "").toContain("boom-marker");
+    expect(execution.errorCode).toBe("EXIT_NONZERO");
   }, 60000);
 
   it("ignores garbage stdout: child output is never authority", async () => {
@@ -177,7 +185,9 @@ describe("command worker provider", () => {
     const escape = await setupTask([{ resource: "src/nowhere.txt", access: "WRITE" }]);
     const escaped = await runAgent(escape, ["--write-absolute", `${outside}=evil\n`]);
 
-    expect(escaped.execution.status).toBe("COMPLETED");
+    // M19.4 Policy 3: the worktree itself is unchanged, so the valid run is
+    // COMPLETED_EMPTY; the outside write still lands (documented boundary).
+    expect(escaped.execution.status).toBe("COMPLETED_EMPTY");
     expect(escaped.execution.changedResources).toEqual([]);
     await expect(readFile(outside, "utf8")).resolves.toBe("evil\n");
   }, 120000);
@@ -258,5 +268,97 @@ describe("command worker provider", () => {
       delete process.env["ATLAS_M11_TEST_SECRET"];
       delete process.env["ATLAS_M11_TEST_PUBLIC"];
     }
+  }, 60000);
+
+  it("classifies a timeout-killed child as TIMEOUT with the existing message", async () => {
+    const dir = await makeTempDir();
+    const error = await new CommandWorkerProvider({
+      command: [process.execPath, "-e", "setInterval(() => {}, 1000);"],
+      timeoutMs: 1000,
+    })
+      .execute(providerInput(dir))
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(error).toBeInstanceOf(CommandFailureError);
+    expect((error as CommandFailureError).kind).toBe("TIMEOUT");
+    expect((error as CommandFailureError).timedOut).toBe(true);
+    expect((error as Error).message).toContain("command terminated by SIGTERM");
+  }, 60000);
+
+  it("classifies a non-zero exit as EXIT_NONZERO preserving stderr evidence", async () => {
+    const dir = await makeTempDir();
+    const error = await new CommandWorkerProvider({
+      command: [process.execPath, "-e", "console.error('boom-517'); process.exit(3);"],
+      timeoutMs: 15000,
+    })
+      .execute(providerInput(dir))
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(error).toBeInstanceOf(CommandFailureError);
+    expect((error as CommandFailureError).kind).toBe("EXIT_NONZERO");
+    expect((error as CommandFailureError).exitCode).toBe(3);
+    expect((error as Error).message).toContain("command exited with code 3");
+    expect((error as Error).message).toContain("boom-517");
+  }, 60000);
+
+  it("classifies a provider rate-limit signature as RATE_LIMIT", async () => {
+    const dir = await makeTempDir();
+    const error = await new CommandWorkerProvider({
+      command: [
+        process.execPath,
+        "-e",
+        "console.error('AI_APICallError: Rate limit exceeded. Please try again later.'); process.exit(1);",
+      ],
+      timeoutMs: 15000,
+    })
+      .execute(providerInput(dir))
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(error).toBeInstanceOf(CommandFailureError);
+    expect((error as CommandFailureError).kind).toBe("RATE_LIMIT");
+    // The provider's diagnostic text is preserved, not replaced.
+    expect((error as Error).message).toContain("Rate limit exceeded");
+  }, 60000);
+
+  it("does not classify generic stderr as RATE_LIMIT", async () => {
+    const dir = await makeTempDir();
+    const run = (script: string) =>
+      new CommandWorkerProvider({ command: [process.execPath, "-e", script], timeoutMs: 15000 })
+        .execute(providerInput(dir))
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+
+    const gerund = await run("console.error('rate limiting enabled'); process.exit(1);");
+    expect((gerund as CommandFailureError).kind).toBe("EXIT_NONZERO");
+    const numbers = await run("console.error('boom-517 total=42'); process.exit(1);");
+    expect((numbers as CommandFailureError).kind).toBe("EXIT_NONZERO");
+  }, 60000);
+
+  it("classifies an unspawnable executable as SPAWN_FAILED", async () => {
+    const dir = await makeTempDir();
+    const error = await new CommandWorkerProvider({
+      command: ["/nonexistent-atlas-binary-xyz"],
+      timeoutMs: 15000,
+    })
+      .execute(providerInput(dir))
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(error).toBeInstanceOf(CommandFailureError);
+    expect((error as CommandFailureError).kind).toBe("SPAWN_FAILED");
+    expect((error as Error).message).toContain("command failed to start");
   }, 60000);
 });

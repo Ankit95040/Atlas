@@ -13,7 +13,7 @@ import {
   transitionTask,
 } from "../src/core/service.js";
 import { createTaskClaims } from "../src/claims/index.js";
-import { CommandWorkerProvider } from "../src/workers/index.js";
+import { CommandWorkerProvider, FakeWorkerProvider } from "../src/workers/index.js";
 import { runFeatureWaveLoop } from "../src/orchestrator/index.js";
 import { track, uniqueName } from "./domain-helpers.js";
 import { makeTempDir } from "./git-helpers.js";
@@ -578,5 +578,81 @@ describe("feature wave-run loop", () => {
     // A's file never appears in B's isolated worktree and vice versa.
     await expect(readFile(join(pathA, "src/b.txt"), "utf8")).rejects.toThrow();
     await expect(readFile(join(pathB, "src/a.txt"), "utf8")).rejects.toThrow();
+  }, 180000);
+
+  it("records workerMs, verificationMs, and schedulingMs (M19.1 phase timing)", async () => {
+    const { repoDir, baseCommit } = await initLoopRepo({}, checkScript({ "src/a.txt": ["a\n"] }));
+    const setup = await setupLoopFeature(repoDir, [{ key: "a", claims: [{ resource: "src/a.txt", access: "WRITE" }] }]);
+
+    const result = await runFeatureWaveLoop(
+      {
+        featureId: setup.featureId,
+        repositoryId: setup.repositoryId,
+        baseCommit,
+        workspaceRoot: setup.scratchRoot,
+        trainBranch: `atlas/m19/${uniqueName("train")}`,
+        trainPath: join(setup.scratchRoot, "train"),
+        approvalActor: "m19-test",
+        testCommand: ["node", "check.mjs"],
+        maxConcurrency: 4,
+      },
+      {
+        createProvider: () =>
+          new FakeWorkerProvider({ files: { "src/a.txt": "a\n" }, commitMessage: "fake a", delayMs: 60 }),
+        track,
+      },
+      db,
+    );
+    await trackLoopEvents(setup.taskIds.values());
+
+    expect(result.waves).toHaveLength(1);
+    const outcome = result.outcomes[0] as (typeof result.outcomes)[number];
+    expect(outcome.execution.status).toBe("COMPLETED");
+    // A. workerMs measures the provider execution span (60ms injected delay).
+    expect(typeof outcome.workerMs).toBe("number");
+    expect(outcome.workerMs as number).toBeGreaterThanOrEqual(50);
+    // D. verificationMs recorded when verification ran.
+    expect(outcome.verification?.verdict).toBe("VERIFIED");
+    expect(typeof outcome.verificationMs).toBe("number");
+    expect(outcome.verificationMs as number).toBeGreaterThanOrEqual(0);
+    // C. one scheduling span per planning round: the executed wave plus the
+    // terminal round that plans but finds no fresh tasks.
+    expect(result.schedulingMs).toBeDefined();
+    expect((result.schedulingMs ?? []).length).toBeGreaterThanOrEqual(result.waves.length);
+    for (const ms of result.schedulingMs ?? []) {
+      expect(Number.isFinite(ms)).toBe(true);
+      expect(ms).toBeGreaterThanOrEqual(0);
+    }
+  }, 180000);
+
+  it("records null verificationMs when verification does not run", async () => {
+    const { repoDir, baseCommit } = await initLoopRepo({}, checkScript({ "src/a.txt": ["a\n"] }));
+    const setup = await setupLoopFeature(repoDir, [{ key: "a", claims: [{ resource: "src/a.txt", access: "WRITE" }] }]);
+
+    const result = await runFeatureWaveLoop(
+      {
+        featureId: setup.featureId,
+        repositoryId: setup.repositoryId,
+        baseCommit,
+        workspaceRoot: setup.scratchRoot,
+        trainBranch: `atlas/m19/${uniqueName("train")}`,
+        trainPath: join(setup.scratchRoot, "train"),
+        approvalActor: "m19-test",
+        testCommand: ["node", "check.mjs"],
+        maxConcurrency: 4,
+      },
+      {
+        createProvider: () => new FakeWorkerProvider({ failWith: "boom" }),
+        track,
+      },
+      db,
+    );
+    await trackLoopEvents(setup.taskIds.values());
+
+    const outcome = result.outcomes[0] as (typeof result.outcomes)[number];
+    expect(outcome.execution.status).toBe("FAILED");
+    expect(outcome.verification).toBeNull();
+    expect(outcome.verificationMs).toBeNull();
+    expect(typeof outcome.workerMs).toBe("number");
   }, 180000);
 });

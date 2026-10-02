@@ -6,6 +6,7 @@ import { commitShaSchema, idSchema } from "../core/inputs.js";
 export const TriageClassificationSchema = z.enum([
   "CLAIM_CONFLICT",
   "GIT_CONFLICT",
+  "EMPTY_MERGE",
   "DEPENDENCY_ORDERING",
   "SEMANTIC_RISK",
   "UNKNOWN",
@@ -17,6 +18,7 @@ export type TriageClassification = z.infer<typeof TriageClassificationSchema>;
 export const CLASSIFICATION_ORDER: readonly TriageClassification[] = [
   "CLAIM_CONFLICT",
   "GIT_CONFLICT",
+  "EMPTY_MERGE",
   "DEPENDENCY_ORDERING",
   "SEMANTIC_RISK",
   "UNKNOWN",
@@ -28,10 +30,16 @@ const TriageTrainItemSchema = z
   .object({
     taskId: idSchema,
     workerId: idSchema,
-    status: z.enum(["INTEGRATED", "CONFLICT", "MERGE_FAILED", "TESTS_FAILED", "VERIFICATION_FAILED", "NOT_ATTEMPTED"]),
+    status: z.enum(["INTEGRATED", "CONFLICT", "MERGE_FAILED", "SKIPPED_EMPTY", "TESTS_FAILED", "VERIFICATION_FAILED", "NOT_ATTEMPTED"]),
     testRunId: idSchema.optional(),
     mergeCommit: commitShaSchema.optional(),
     reason: z.string().max(5000).optional(),
+    /**
+     * Set by the merge train when a worker branch contained no changes over
+     * the integration base (M19.3). Drives the EMPTY_MERGE finding; absent
+     * everywhere else (absence is not evidence).
+     */
+    emptyMerge: z.boolean().optional(),
   })
   .strict();
 

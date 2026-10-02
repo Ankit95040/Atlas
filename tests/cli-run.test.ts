@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { getPrismaClient } from "../src/db/client.js";
 import { getCurrentCommit, runGit } from "../src/git/index.js";
 import { createFeature, createProject, createRepository } from "../src/core/service.js";
+import { payloadWorkerId } from "../src/workspaces/index.js";
 import { runPlanCommand } from "../src/cli/plan.js";
 import { runRunCommand } from "../src/cli/run-command.js";
 import { track, uniqueName } from "./domain-helpers.js";
@@ -83,8 +84,20 @@ async function trackRunScope(featureId: string): Promise<void> {
   const taskIds = tasks.map((task) => task.id);
   for (const task of tasks) track("task", task.id);
   for (const row of await db.approval.findMany({ where: { featureId } })) track("approval", row.id);
-  for (const row of await db.worker.findMany({ where: { taskId: { in: taskIds } } })) track("worker", row.id);
-  for (const row of await db.workspace.findMany({ where: { worker: { taskId: { in: taskIds } } } })) {
+  // M23.1: released terminal workers are invisible to the live-link query;
+  // resolve every worker that ever touched these tasks via event payloads.
+  const workerIds = new Set<string>();
+  for (const row of await db.worker.findMany({ where: { taskId: { in: taskIds } }, select: { id: true } })) {
+    workerIds.add(row.id);
+  }
+  for (const row of await db.event.findMany({ where: { taskId: { in: taskIds } }, select: { payload: true } })) {
+    const wid = payloadWorkerId(row.payload);
+    if (wid !== null) {
+      workerIds.add(wid);
+    }
+  }
+  for (const id of workerIds) track("worker", id);
+  for (const row of await db.workspace.findMany({ where: { workerId: { in: [...workerIds] } } })) {
     track("workspace", row.id);
   }
   for (const row of await db.taskDependency.findMany({ where: { taskId: { in: taskIds } } })) {
@@ -240,5 +253,42 @@ describe("atlas run", () => {
     // Execution ran under authorization, but nothing verified: halted, not silent.
     expect(output.exitCode).toBe(2);
     expect(output.human).toContain("CLAIM_VIOLATION");
+  }, 180000);
+
+  it("applies --agent-timeout-ms to the worker provider timeout (M20.2a)", async () => {
+    const fixture = await setupRunFixture(PASS_CHECK);
+    const approvalId = await planAndApprove(fixture.featureId);
+
+    const startedAt = Date.now();
+    const output = await runRunCommand(
+      {
+        featureId: fixture.featureId,
+        repositoryId: fixture.repositoryId,
+        planApproval: approvalId,
+        actor: "ada",
+        agent: process.execPath,
+        agentArg: [AGENT, "--sleep", "30000"],
+        agentTimeoutMs: 1000,
+        approveMerge: true,
+        testCommand: process.execPath,
+        testArg: ["check.mjs"],
+        workspaceRoot: join(fixture.scratchRoot, "work"),
+        trainPath: join(fixture.scratchRoot, "train"),
+      },
+      db,
+    );
+    const wallMs = Date.now() - startedAt;
+    await trackRunScope(fixture.featureId);
+
+    // The flag reached the provider: killed near 1s (plus SIGKILL grace),
+    // far below both the 30s sleep and the 120s provider default.
+    expect(output.exitCode).toBe(2);
+    expect(wallMs).toBeLessThan(30000);
+    const data = output.data as {
+      outcomes: Array<{ execution: { status: string; errorCode?: string } }>;
+    };
+    expect(data.outcomes).toHaveLength(1);
+    expect(data.outcomes[0]?.execution.status).toBe("FAILED");
+    expect(data.outcomes[0]?.execution.errorCode).toBe("TIMEOUT");
   }, 180000);
 });

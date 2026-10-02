@@ -47,10 +47,23 @@ export const ProviderOutputSchema = z
 
 export type ProviderOutput = z.infer<typeof ProviderOutputSchema>;
 
+// ---------- Provider failure classification (M19.2 structured evidence) ----------
+
+/**
+ * Machine-readable command failure kind, determined by the spawn boundary
+ * itself (which knows whether it killed, observed, or failed to start the
+ * child) rather than inferred later from stderr text. Carried alongside —
+ * never inside — the human-readable error message. RATE_LIMIT additionally
+ * requires the provider's distinctive rate-limit phrase in observed stderr;
+ * bare numbers or generic text never qualify (M19.2/M20.3).
+ */
+export type CommandFailureKind = "TIMEOUT" | "EXIT_NONZERO" | "SPAWN_FAILED" | "OUTPUT_OVERFLOW" | "RATE_LIMIT";
+
 // ---------- Execution result (the only success channel) ----------
 
 export type WorkerExecutionStatus =
   | "COMPLETED"
+  | "COMPLETED_EMPTY"
   | "FAILED"
   | "CLAIM_VIOLATION"
   | "INVALID_WORKSPACE"
@@ -81,6 +94,12 @@ export interface WorkerExecutionResult {
     readonly summaryArtifactId: string;
   };
   readonly error?: string;
+  /**
+   * Structured failure kind when the failure came from the command boundary
+   * (M19.2); absent for all other failure sources. Optional so previously
+   * constructed results still typecheck.
+   */
+  readonly errorCode?: CommandFailureKind;
   /** Provider's own summary, echoed verbatim. Never verification evidence. */
   readonly providerSummary?: string;
 }

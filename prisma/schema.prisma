@@ -38,6 +38,9 @@ enum TaskStatus {
   BLOCKED
   VERIFICATION
   COMPLETED
+  // M19.4: valid execution hygiene with no effective source contribution.
+  // Terminal; distinct from COMPLETED (contribution) and FAILED (invalid).
+  COMPLETED_EMPTY
   FAILED
   CANCELLED
 }
@@ -95,6 +98,25 @@ enum EventType {
   APPROVAL_REQUESTED
   APPROVAL_GRANTED
   APPROVAL_REJECTED
+  // M19.5 lifecycle coverage (additive; existing values untouched).
+  WORKFLOW_STARTED
+  PLAN_CREATED
+  TASK_SCHEDULED
+  TASK_COMPLETED
+  TASK_FAILED
+  VERIFICATION_STARTED
+  VERIFICATION_COMPLETED
+  INTEGRATION_STARTED
+  INTEGRATION_COMPLETED
+  INTEGRATION_FAILED
+  MERGE_CONFLICT
+  RUN_COMPLETED
+  RUN_FAILED
+  // M20.2b: explicit human-confirmed recovery of stranded assignments.
+  TASK_RECOVERED
+  // M22: explicit human-driven task transitions out of stuck states
+  // (VERIFICATION-stuck, orphaned IN_PROGRESS). Single allowed edges only.
+  TASK_TRANSITIONED
 }
 
 // ---------- Roots ----------

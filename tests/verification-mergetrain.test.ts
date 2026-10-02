@@ -100,7 +100,9 @@ async function setupTrainItem(
     { taskId: ready.id, workerId: worker.id, expectedBaseCommit: assignment.worktree.commit },
     new FakeWorkerProvider(commit ? { files, commitMessage: `fake: ${suffix}` } : { files }),
   );
-  if (execution.status !== "COMPLETED") {
+  // M19.4: an empty valid execution (COMPLETED_EMPTY) is legitimate fixture
+  // input for merge-train tests, alongside ordinary COMPLETED work.
+  if (execution.status !== "COMPLETED" && execution.status !== "COMPLETED_EMPTY") {
     throw new Error(`fixture execution failed: ${execution.status} ${execution.error ?? ""}`);
   }
   const { runTests } = await import("../src/verification/index.js");
@@ -152,6 +154,7 @@ async function trainInput(
   approvalId: string,
   items: TrainItem[],
   extra: Record<string, unknown> = {},
+  sequences: Record<string, number> = {},
 ) {
   const scratch = await makeTempDir();
   return {
@@ -165,6 +168,7 @@ async function trainInput(
       workerId: item.workerId,
       expectedBaseCommit: item.baseCommit,
       testRunId: item.testRunId,
+      ...(item.taskId in sequences ? { sequence: sequences[item.taskId] as number } : {}),
     })),
     ...extra,
   };
@@ -210,6 +214,157 @@ describe("merge train", () => {
     expect(result.approval.actor).toBe("human");
   });
 
+  it("preserves merge evidence on items and result (M19.3)", async () => {
+    const repoDir = await initTrainRepo(PASS_CHECK);
+    const base = await getCurrentCommit(repoDir);
+    const { repository, feature } = await setupTrainProject("evidence", repoDir);
+    const itemA = await setupTrainItem("evidence-a", repoDir, repository.id, feature.id, [{ resource: "src/a.txt", access: "WRITE" }], { "src/a.txt": "aaa\n" }, true);
+    const approvalId = await approveTrain(feature.id);
+
+    const result = await runMergeTrain(
+      await trainInput("evidence", repository.id, base, approvalId, [itemA], { testCommand: [NODE, "--eval", "process.exit(0);"] }),
+      db,
+    );
+    await trackTrainRecords(itemA.taskId);
+
+    expect(result.status).toBe("COMPLETED");
+    const [item] = result.items;
+    expect(item?.status).toBe("INTEGRATED");
+    expect(item?.mergeCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(item?.testRunId).toBeDefined();
+    expect(item?.sourceCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(item?.reason).toBeUndefined();
+    expect(item?.emptyMerge).toBeUndefined();
+    expect(item?.conflictFiles).toBeUndefined();
+    expect(result.testCommand).toEqual([NODE, "--eval", "process.exit(0);"]);
+    expect(result.finalCommit).not.toBe(base);
+  });
+
+  it("records per-item and cumulative merge-train timing (M19.1)", async () => {
+    const repoDir = await initTrainRepo(PASS_CHECK);
+    const base = await getCurrentCommit(repoDir);
+    const { repository, feature } = await setupTrainProject("timing", repoDir);
+    const itemA = await setupTrainItem("timing-a", repoDir, repository.id, feature.id, [{ resource: "src/a.txt", access: "WRITE" }], { "src/a.txt": "aaa\n" }, true);
+    const itemB = await setupTrainItem("timing-b", repoDir, repository.id, feature.id, [{ resource: "src/b.txt", access: "WRITE" }], { "src/b.txt": "bbb\n" }, true);
+    const approvalId = await approveTrain(feature.id);
+
+    const result = await runMergeTrain(await trainInput("timing", repository.id, base, approvalId, [itemA, itemB]), db);
+    for (const item of [itemA, itemB]) await trackTrainRecords(item.taskId);
+
+    expect(result.status).toBe("COMPLETED");
+    // E. every processed item carries a finite, non-negative duration.
+    expect(result.items).toHaveLength(2);
+    const durations: number[] = [];
+    for (const item of result.items) {
+      expect(Number.isFinite(item.durationMs)).toBe(true);
+      expect(item.durationMs as number).toBeGreaterThanOrEqual(0);
+      durations.push(item.durationMs as number);
+    }
+    // F. cumulative train timing covers every item span.
+    expect(Number.isFinite(result.durationMs)).toBe(true);
+    expect(result.durationMs as number).toBeGreaterThanOrEqual(0);
+    expect(result.durationMs as number).toBeGreaterThanOrEqual(Math.max(...durations));
+  });
+
+  it("continues past skipped empty items and still integrates later work (M19.4)", async () => {
+    const repoDir = await initTrainRepo(PASS_CHECK);
+    const base = await getCurrentCommit(repoDir);
+    const { repository, feature } = await setupTrainProject("skip", repoDir);
+    const emptyItem = await setupTrainItem("skip-empty", repoDir, repository.id, feature.id, [{ resource: "src/e.txt", access: "WRITE" }], {}, false);
+    const validItem = await setupTrainItem("skip-valid", repoDir, repository.id, feature.id, [{ resource: "src/a.txt", access: "WRITE" }], { "src/a.txt": "aaa\n" }, true);
+    const approvalId = await approveTrain(feature.id);
+
+    const result = await runMergeTrain(
+      await trainInput("skip", repository.id, base, approvalId, [emptyItem, validItem], {}, {
+        [emptyItem.taskId]: 0,
+        [validItem.taskId]: 1,
+      }),
+      db,
+    );
+    for (const item of [emptyItem, validItem]) await trackTrainRecords(item.taskId);
+
+    expect(result.status).toBe("COMPLETED");
+    const byId = new Map(result.items.map((entry) => [entry.taskId, entry]));
+    expect(byId.get(emptyItem.taskId)?.status).toBe("SKIPPED_EMPTY");
+    expect(byId.get(emptyItem.taskId)?.emptyMerge).toBe(true);
+    expect(byId.get(validItem.taskId)?.status).toBe("INTEGRATED");
+    expect(byId.get(validItem.taskId)?.mergeCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(result.finalCommit).not.toBe(base);
+    expect(await db.commit.count({ where: { branch: result.trainBranch } })).toBe(1);
+    expect(await readFileSafe(result.trainPath, "src/a.txt")).toBe("aaa\n");
+  });
+
+  it("keeps EMPTY_MERGE diagnosable when a halted train contains a skip (M19.4)", async () => {
+    const repoDir = await initTrainRepo(PASS_CHECK, { "shared.txt": "base\n" });
+    const base = await getCurrentCommit(repoDir);
+    const { repository, feature } = await setupTrainProject("skiphalt", repoDir);
+    const emptyItem = await setupTrainItem("skiphalt-empty", repoDir, repository.id, feature.id, [{ resource: "src/e.txt", access: "WRITE" }], {}, false);
+    const itemA = await setupTrainItem("skiphalt-a", repoDir, repository.id, feature.id, [{ resource: "shared.txt", access: "WRITE" }], { "shared.txt": "aaa\n" }, true);
+    const itemB = await setupTrainItem("skiphalt-b", repoDir, repository.id, feature.id, [{ resource: "shared.txt", access: "WRITE" }], { "shared.txt": "bbb\n" }, true);
+    const approvalId = await approveTrain(feature.id);
+
+    const result = await runMergeTrain(
+      await trainInput("skiphalt", repository.id, base, approvalId, [emptyItem, itemA, itemB], {}, {
+        [emptyItem.taskId]: 0,
+        [itemA.taskId]: 1,
+        [itemB.taskId]: 2,
+      }),
+      db,
+    );
+    for (const item of [emptyItem, itemA, itemB]) await trackTrainRecords(item.taskId);
+
+    expect(result.status).toBe("HALTED");
+    const byId = new Map(result.items.map((entry) => [entry.taskId, entry]));
+    expect(byId.get(emptyItem.taskId)?.status).toBe("SKIPPED_EMPTY");
+    expect([...byId.values()].filter((entry) => entry.status === "CONFLICT")).toHaveLength(1);
+
+    const { triageIntegrationHalt } = await import("../src/triage/index.js");
+    const scratch = await makeTempDir();
+    const report = await triageIntegrationHalt(
+      {
+        repositoryId: repository.id,
+        baseCommit: base,
+        finalCommit: result.finalCommit,
+        items: result.items.map((entry) => ({
+          taskId: entry.taskId,
+          workerId: entry.workerId,
+          status: entry.status,
+          ...(entry.testRunId !== undefined ? { testRunId: entry.testRunId } : {}),
+          ...(entry.mergeCommit !== undefined ? { mergeCommit: entry.mergeCommit } : {}),
+          ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+          ...(entry.emptyMerge !== undefined ? { emptyMerge: entry.emptyMerge } : {}),
+        })),
+        scratchParent: trackTempPath(`${scratch}/triage`),
+      },
+      db,
+    );
+    expect(report.classifications).toContain("EMPTY_MERGE");
+    expect(report.classifications).toContain("GIT_CONFLICT");
+    track("artifact", report.evidenceRefs.artifactId);
+  });
+
+  it("preserves git exit/stderr evidence on merge command failure (M19.3)", async () => {
+    const repoDir = await initTrainRepo(PASS_CHECK);
+    // Repo-local signature enforcement makes the merge itself fail without
+    // any textual conflict: deterministic git-error path.
+    await runGit(["config", "merge.verifySignatures", "true"], { cwd: repoDir });
+    const base = await getCurrentCommit(repoDir);
+    const { repository, feature } = await setupTrainProject("giterror", repoDir);
+    const item = await setupTrainItem("giterror-a", repoDir, repository.id, feature.id, [{ resource: "src/a.txt", access: "WRITE" }], { "src/a.txt": "aaa\n" }, true);
+    const approvalId = await approveTrain(feature.id);
+
+    const result = await runMergeTrain(await trainInput("giterror", repository.id, base, approvalId, [item]), db);
+    await trackTrainRecords(item.taskId);
+
+    expect(result.status).toBe("HALTED");
+    const [entry] = result.items;
+    expect(entry?.status).toBe("MERGE_FAILED");
+    expect(entry?.emptyMerge).toBeUndefined();
+    expect(entry?.gitExitCode).toBe(128);
+    expect(entry?.gitStderr ?? "").toContain("GPG signature");
+    expect(entry?.reason ?? "").toContain("merge failed");
+  });
+
   it("halts on merge conflicts without touching main or worker workspaces", async () => {
     const repoDir = await initTrainRepo(PASS_CHECK, { "shared.txt": "base\n" });
     const base = await getCurrentCommit(repoDir);
@@ -228,6 +383,14 @@ describe("merge train", () => {
     expect(integrated).toHaveLength(1);
     expect(conflicted).toHaveLength(1);
     expect(conflicted[0]?.reason ?? "").toContain("shared.txt");
+    // Conflict paths preserved structurally, not just in the reason text.
+    expect(conflicted[0]?.conflictFiles ?? []).toContain("shared.txt");
+    expect(conflicted[0]?.emptyMerge).toBeUndefined();
+    // Halted-path items also carry timing (M19.1).
+    for (const item of result.items) {
+      expect(Number.isFinite(item.durationMs)).toBe(true);
+    }
+    expect(Number.isFinite(result.durationMs)).toBe(true);
     expect(result.haltReason ?? "").toContain("shared.txt");
 
     expect(await getCurrentCommit(repoDir)).toBe(base);
@@ -298,11 +461,12 @@ describe("merge train", () => {
     expect(await db.commit.count({ where: { branch: result.trainBranch } })).toBe(0);
   });
 
-  it("halts when the worker branch has no changes over the base instead of crashing on commit", async () => {
+  it("skips an empty worker branch instead of crashing on commit (M19.4 policy)", async () => {
     // A worker can finish successfully while its registered branch contains
     // no commit over the train base (e.g. a real agent that exited 0 without
     // committing). The merge is then a silent no-op ("Already up to date")
     // and a bare `git commit` would explode with "nothing to commit".
+    // M19.4: the item is skipped with evidence instead of halting the train.
     const repoDir = await initTrainRepo(PASS_CHECK);
     const base = await getCurrentCommit(repoDir);
     const { repository, feature } = await setupTrainProject("empty", repoDir);
@@ -313,14 +477,16 @@ describe("merge train", () => {
     const result = await runMergeTrain(await trainInput("empty", repository.id, base, approvalId, [item]), db);
     await trackTrainRecords(item.taskId);
 
-    expect(result.status).toBe("HALTED");
+    expect(result.status).toBe("COMPLETED");
     expect(result.items).toHaveLength(1);
-    expect(result.items[0]?.status).toBe("MERGE_FAILED");
+    expect(result.items[0]?.status).toBe("SKIPPED_EMPTY");
     expect(result.items[0]?.reason ?? "").toMatch(/no changes over .*base|nothing to integrate/i);
-    expect(result.haltReason ?? "").toMatch(/no changes over .*base|nothing to integrate/i);
+    expect(result.items[0]?.sourceCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(Number.isFinite(result.items[0]?.durationMs)).toBe(true);
     expect(result.finalCommit).toBe(base);
     expect(await db.commit.count({ where: { branch: result.trainBranch } })).toBe(0);
     expect(await getCurrentCommit(repoDir)).toBe(base);
+    expect(await getCurrentBranch(repoDir)).toBe("main");
     expect(await isClean(repoDir)).toBe(true);
     expect(await getCurrentCommit(item.workspacePath)).toBe(item.head);
   });
@@ -334,12 +500,19 @@ describe("merge train", () => {
     const approvalId = await approveTrain(feature.id);
 
     const first = await runMergeTrain(await trainInput("order1", repository.id, base, approvalId, [itemA, itemB]), db);
+    for (const item of [itemA, itemB]) await trackTrainRecords(item.taskId);
+    expect(first.items.map((item) => item.status)).toEqual(["INTEGRATED", "INTEGRATED"]);
+    expect(await db.commit.count({ where: { branch: first.trainBranch } })).toBe(2);
+    // M23.1: INTEGRATED consumes the worker association, so re-training the
+    // same items cannot re-verify through a live link — the second train
+    // halts truthfully with LINK_INVALID instead of duplicating merges.
     const second = await runMergeTrain(await trainInput("order2", repository.id, base, approvalId, [itemB, itemA]), db);
     for (const item of [itemA, itemB]) await trackTrainRecords(item.taskId);
     expect(first.items.map((item) => item.taskId)).toEqual(second.items.map((item) => item.taskId));
-    expect(first.items.map((item) => item.status)).toEqual(["INTEGRATED", "INTEGRATED"]);
-    expect(await db.commit.count({ where: { branch: first.trainBranch } })).toBe(2);
-    expect(await db.commit.count({ where: { branch: second.trainBranch } })).toBe(2);
+    expect(second.status).toBe("HALTED");
+    expect(second.items.map((item) => item.status)).toEqual(["VERIFICATION_FAILED", "NOT_ATTEMPTED"]);
+    expect(second.items[0]?.reason ?? "").toMatch(/LINK_INVALID/);
+    expect(await db.commit.count({ where: { branch: second.trainBranch } })).toBe(0);
     for (const branch of [first.trainBranch, second.trainBranch]) {
       for (const c of await db.commit.findMany({ where: { branch } })) track("commit", c.id);
     }
@@ -360,8 +533,9 @@ describe("merge train", () => {
     await trackTrainRecords(item.taskId);
     expect(ok.status).toBe("COMPLETED");
 
-    const missing = await runMergeTrain(await trainInput("explicit2", repository.id, base, approvalId, [item]), db);
-    await trackTrainRecords(item.taskId);
+    const missingItem = await setupTrainItem("explicit-b", repoDir, repository.id, feature.id, [{ resource: "src/a.txt", access: "WRITE" }], { "src/a.txt": "a\n" }, true);
+    const missing = await runMergeTrain(await trainInput("explicit2", repository.id, base, approvalId, [missingItem]), db);
+    await trackTrainRecords(missingItem.taskId);
     expect(missing.status).toBe("HALTED");
     expect(missing.items[0]?.status).toBe("TESTS_FAILED");
     expect(missing.items[0]?.reason ?? "").toMatch(/test command/i);

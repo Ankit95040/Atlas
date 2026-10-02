@@ -2,7 +2,7 @@ import { realpath } from "node:fs/promises";
 import type { PrismaClient } from "@prisma/client";
 import { getPrismaClient } from "../db/client.js";
 import { NotFoundError } from "../core/errors.js";
-import { recordArtifact } from "../core/service.js";
+import { recordArtifact, recordEvent } from "../core/service.js";
 import { getTaskClaims } from "../claims/service.js";
 import { resourceOverlaps } from "../claims/conflicts.js";
 import { getCurrentCommit, getRepositoryRoot, getWorktree, runGit } from "../git/index.js";
@@ -51,6 +51,14 @@ export async function verifyExecution(
     changedResources: string[],
     workspacePath: string,
   ): Promise<VerificationResult> => {
+    // M19.5 lifecycle: verification completion for both VERIFIED and
+    // REJECTED outcomes (reject() funnels through here). M21.2: the fixed
+    // reason vocabulary is persisted alongside the verdict so a rejected
+    // verification stays diagnosable after process exit.
+    await recordEvent(
+      { type: "VERIFICATION_COMPLETED", featureId, taskId: input.taskId, actor: "atlas-verify", payload: { verdict, workerId: input.workerId, reasons } },
+      db,
+    );
     const artifact = await recordArtifact(
       {
         taskId: input.taskId,
@@ -94,6 +102,13 @@ export async function verifyExecution(
   if (worker === null) {
     throw new NotFoundError("Worker", input.workerId);
   }
+  const featureId = task.featureId;
+  // M19.5 lifecycle: verification start, emitted only once the referenced
+  // entities exist (missing rows still throw NotFoundError as before).
+  await recordEvent(
+    { type: "VERIFICATION_STARTED", featureId, taskId: input.taskId, actor: "atlas-verify", payload: { workerId: input.workerId } },
+    db,
+  );
   if (worker.taskId !== task.id || worker.workspace === null) {
     record("links-valid", false, "worker/task/workspace link is broken");
     return reject("LINK_INVALID", "", [], input.workerId, 0);
