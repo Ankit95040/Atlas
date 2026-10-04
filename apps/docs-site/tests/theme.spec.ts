@@ -66,8 +66,10 @@ test("theme: system follows prefers-color-scheme", async ({ page }) => {
 test("homepage: single mission-control visual, hero composition intact", async ({ page }) => {
   await page.goto("/#/");
   await page.waitForTimeout(600);
-  // Exactly one mission-control map on the page (no duplicate).
-  expect(await page.locator('svg[aria-label*="control plane"]').count()).toBe(1);
+  // Exactly one mission-control map visible on the page (no duplicate).
+  // (Desktop and compact-mobile compositions both exist in the DOM; exactly
+  // one is visible per breakpoint.)
+  expect(await page.locator('svg[aria-label*="control plane"]:visible').count()).toBe(1);
   // The old duplicate vision map is gone from the homepage.
   expect(await page.locator('svg[aria-label*="Atlas system map"]').count()).toBe(0);
   // Hero copy present and the reading caption integrated.

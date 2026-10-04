@@ -137,7 +137,7 @@ export function MissionControl(): React.ReactElement {
 
   return (
     <div>
-      <div className="hidden sm:block">
+      <div className="hidden md:block">
         <svg
           viewBox="0 0 1000 640"
           role="img"
@@ -341,8 +341,190 @@ export function MissionControl(): React.ReactElement {
         </div>
       </div>
 
-      {/* Stepped fallback below sm */}
-      <ol className="flex flex-col gap-2 sm:hidden">
+      {/* Command-cluster illustration below md: orchestration core commands
+          a parallel 2+1 worker cluster through a distribution bus; a shared
+          gate rail, integration band, and human boundary follow. Same data,
+          semantics, variables, and interactions as desktop — recomposed for
+          narrow viewports, not scaled down. Desktop SVG above is untouched. */}
+      <div className="md:hidden">
+        <svg
+          viewBox="0 0 400 530"
+          role="img"
+          aria-label="Atlas control plane, compact view: an orchestration core distributes work through a shared bus to a parallel cluster of three isolated worker cells, flowing through a shared verification checkpoint and an ordered merge train to a human approval boundary."
+          className="mission w-full rounded-xl border border-graphite-800 bg-graphite-925"
+        >
+          <defs>
+            <pattern id="mc-grid-mobile" width="28" height="28" patternUnits="userSpaceOnUse">
+              <path d="M 28 0 L 0 0 0 28" fill="none" stroke="var(--mc-grid)" strokeWidth="1" />
+            </pattern>
+          </defs>
+          <rect x={0} y={0} width={400} height={530} fill="url(#mc-grid-mobile)" aria-hidden />
+
+          {/* Human authorization boundary (top) */}
+          <Mono x={200} y={22} size={9} fill="var(--mc-violet-soft)">
+            human authorization · plan approval
+          </Mono>
+          <line x1={24} y1={33} x2={376} y2={33} stroke="var(--mc-violet)" strokeWidth={1.5} strokeDasharray="6 5" />
+
+          {/* Orchestration core: central command node with restrained glow */}
+          <g>
+            <rect x={64} y={42} width={272} height={68} rx={16} fill="none" stroke="var(--mc-blue)" strokeWidth={6} opacity={0.22} />
+            <rect x={70} y={48} width={260} height={60} rx={12} fill="var(--mc-panel)" stroke="var(--mc-blue)" strokeWidth={2.5} />
+            <circle cx={98} cy={78} r={6} fill="var(--mc-blue-soft)" />
+            <Mono x={212} y={75} size={13} fill="var(--mc-text)">
+              orchestration core
+            </Mono>
+            <Mono x={212} y={93} size={9} fill="var(--mc-faint)">
+              claim-aware schedule · wave 2 of 3
+            </Mono>
+          </g>
+
+          {/* Distribution bus: one shared fan-out, not a worker chain.
+              Each worker drops directly from the bus rail. */}
+          <g aria-hidden>
+            <line x1={200} y1={108} x2={200} y2={124} stroke="var(--mc-trace)" strokeWidth={1.5} />
+            <line x1={56} y1={124} x2={344} y2={124} stroke="var(--mc-trace)" strokeWidth={1.5} />
+          </g>
+
+          {/* Parallel worker cluster: 2+1 asymmetric peers under one bus */}
+          {WORKERS.map((worker, i) => {
+            const geo = [{ x: 24, y: 146, wide: false }, { x: 204, y: 146, wide: false }, { x: 76, y: 268, wide: true }][
+              i
+            ] ?? { x: 24, y: 146, wide: false };
+            const { x, y, wide } = geo;
+            const t = traceProps(worker.id);
+            const isActive = activeId === worker.id;
+            const cardW = wide === true ? 248 : 172;
+            const cardH = wide === true ? 80 : 100;
+            const cx = wide === true ? 200 : x + 86;
+            const stateColor =
+              worker.state === "verified"
+                ? "var(--mc-green)"
+                : worker.state === "verifying"
+                  ? "var(--mc-amber-text)"
+                  : "var(--mc-dim)";
+            return (
+              <g key={`m-${worker.id}`}>
+                <g aria-hidden>
+                  <line x1={cx} y1={124} x2={cx} y2={y - 2} stroke={t.stroke} strokeWidth={t.width} />
+                  <polygon points={`${cx - 5},${y - 2} ${cx + 5},${y - 2} ${cx},${y + 5}`} fill={t.stroke} />
+                </g>
+                <g
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`${worker.name}: task ${worker.task}, claim ${worker.claim}, state ${STATE_TEXT[worker.state]}. Activate to inspect its contract.`}
+                  aria-pressed={selected === worker.id}
+                  style={{ cursor: "pointer", outline: "none" }}
+                  {...activate(worker.id)}
+                >
+                  <rect
+                    x={x}
+                    y={y}
+                    width={cardW}
+                    height={cardH}
+                    rx={10}
+                    fill={isActive ? "var(--mc-raised)" : "var(--mc-surface)"}
+                    stroke={isActive ? "var(--mc-blue)" : "var(--mc-line)"}
+                    strokeWidth={isActive ? 2 : 1.5}
+                  />
+                  <circle cx={x + 20} cy={y + 22} r={5} fill={STATE_FILL[worker.state]} />
+                  <Mono x={x + 34} y={y + 26} anchor="start" size={11} fill="var(--mc-text)">
+                    {worker.name}
+                  </Mono>
+                  <Mono x={x + 14} y={y + 48} anchor="start" size={9} fill="var(--mc-sub)">
+                    {worker.task}
+                  </Mono>
+                  {wide === true ? (
+                    <Mono x={x + 14} y={y + 66} anchor="start" size={8} fill="var(--mc-faint)">
+                      {worker.claim} · {STATE_TEXT[worker.state]}
+                    </Mono>
+                  ) : (
+                    <g>
+                      <Mono x={x + 14} y={y + 64} anchor="start" size={8} fill="var(--mc-faint)">
+                        {worker.claim}
+                      </Mono>
+                      <Mono x={x + 14} y={y + 80} anchor="start" size={8} fill={stateColor}>
+                        {STATE_TEXT[worker.state]}
+                      </Mono>
+                    </g>
+                  )}
+                </g>
+              </g>
+            );
+          })}
+
+          {/* Shared verification checkpoint: one rail for the whole cluster.
+              Outer drops run rail-to-band behind the diamonds; the caption
+              sits in the clear zone between rail and band. */}
+          <line x1={32} y1={378} x2={368} y2={378} stroke="var(--mc-line)" strokeWidth={1} strokeDasharray="4 4" />
+          {[
+            { id: "w1", cx: 48 },
+            { id: "w2", cx: 352 },
+            { id: "w3", cx: 200 },
+          ].map(({ id, cx }) => {
+            const worker = WORKERS.find((candidate) => candidate.id === id);
+            if (worker === undefined) {
+              return null;
+            }
+            return (
+              <g key={`mgate-${id}`} aria-hidden>
+                <line x1={cx} y1={id === "w3" ? 348 : 250} x2={cx} y2={406} stroke="var(--mc-trace)" strokeWidth={1.5} />
+                <polygon
+                  points={`${cx},367 ${cx + 11},378 ${cx},389 ${cx - 11},378`}
+                  fill="var(--mc-panel)"
+                  stroke={STATE_FILL[worker.state]}
+                  strokeWidth={2}
+                />
+              </g>
+            );
+          })}
+          <Mono x={200} y={396} size={9} fill="var(--mc-sub)">
+            verification gates — shared checkpoint
+          </Mono>
+
+          {/* Ordered merge train: distinct integration band */}
+          <rect x={24} y={406} width={352} height={74} rx={10} fill="var(--mc-panel)" stroke="var(--mc-line)" strokeWidth={1.5} />
+          <Mono x={200} y={422} size={9} fill="var(--mc-sub)">
+            merge train — ordered integration · conflicts halt
+          </Mono>
+          {[0, 1, 2].map((i) => (
+            <g key={`mcar-${i}`} aria-hidden>
+              <rect x={38 + i * 106} y={432} width={94} height={26} rx={5} fill="var(--mc-car)" stroke="var(--mc-dim)" strokeWidth={1.5} />
+              <Mono x={85 + i * 106} y={449} size={8} fill="var(--mc-sub)">
+                {`${i + 1} · ${i === 0 ? "integrated" : i === 1 ? "verifying" : "queued"}`}
+              </Mono>
+              {i < 2 && <polygon points={`${134 + i * 106},438 ${134 + i * 106},452 ${142 + i * 106},445`} fill="var(--mc-dim)" />}
+            </g>
+          ))}
+          <Mono x={200} y={472} size={8} fill="var(--mc-faint)">
+            main untouched
+          </Mono>
+
+          {/* Human approval: double violet rule, set apart from automation */}
+          <line x1={200} y1={480} x2={200} y2={492} stroke="var(--mc-trace)" strokeWidth={1.5} />
+          <line x1={24} y1={492} x2={376} y2={492} stroke="var(--mc-violet)" strokeWidth={2} />
+          <line x1={24} y1={497} x2={376} y2={497} stroke="var(--mc-violet)" strokeWidth={1} opacity={0.55} />
+          <Mono x={200} y={515} size={10} fill="var(--mc-violet-soft)">
+            human approval — you merge main
+          </Mono>
+        </svg>
+        <p role="status" className="mt-3 min-h-6 text-[13px] text-ink-300">
+          {active !== null ? (
+            <>
+              <strong className="font-mono text-xs font-semibold text-ink-100">{active.name}</strong>
+              <span className="text-ink-500"> — </span>
+              {active.detail}
+            </>
+          ) : (
+            <span className="text-ink-500">
+              Tap a worker cell to inspect its contract. Architectural illustration — not live data.
+            </span>
+          )}
+        </p>
+      </div>
+
+      {/* Stepped fallback below md */}
+      <ol className="flex flex-col gap-2 md:hidden">
         {[
           ["Human authorization", "Plan approval with a recorded actor opens the run."],
           ["Orchestration core", "Claim-aware schedule fans work into isolated cells."],

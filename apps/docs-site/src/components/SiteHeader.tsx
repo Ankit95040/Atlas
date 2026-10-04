@@ -13,18 +13,27 @@ const LINKS = [
   { href: "#/docs/architecture/overview", label: "Architecture", icon: Network, match: (r: string) => r.startsWith("#/docs/architecture") },
 ] as const;
 
-// Geometric Atlas identity: one orchestration core fanning into three
-// isolated worker nodes — the system map reduced to a mark. Single accent
-// fill, graphite strokes, legible at 16px.
+// Atlas identity lockup: geometric system-mark fused to an instrument
+// wordmark — uppercase, wide-tracked, medium weight — separated by a
+// hairline rule. Architectural, precise, and legible from 26px in both
+// themes; the blue accent lives in the mark, the wordmark stays ink.
 function BrandMark(): React.ReactElement {
   return (
-    <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden fill="none">
-      <path d="M11 3v5M11 8L4.5 16M11 8l6.5 8" stroke="#2f7cf6" strokeWidth="1.6" strokeLinecap="round" />
-      <circle cx="11" cy="3.4" r="2.4" fill="#2f7cf6" />
-      <circle cx="3.6" cy="17.4" r="2" fill="#0b0e14" stroke="#5b9bff" strokeWidth="1.6" />
-      <circle cx="11" cy="18.2" r="2" fill="#0b0e14" stroke="#5b9bff" strokeWidth="1.6" />
-      <circle cx="18.4" cy="17.4" r="2" fill="#0b0e14" stroke="#5b9bff" strokeWidth="1.6" />
+    <svg width="26" height="26" viewBox="0 0 22 22" aria-hidden fill="none">
+      <path d="M11 3v5M11 8L4.4 16.2M11 8l6.6 8.2" stroke="#2f7cf6" strokeWidth="1.7" strokeLinecap="round" />
+      <circle cx="11" cy="3.4" r="2.6" fill="#2f7cf6" />
+      <circle cx="3.6" cy="17.6" r="2.15" fill="#0b0e14" stroke="#5b9bff" strokeWidth="1.7" />
+      <circle cx="11" cy="17.6" r="2.15" fill="#0b0e14" stroke="#5b9bff" strokeWidth="1.7" />
+      <circle cx="18.4" cy="17.6" r="2.15" fill="#0b0e14" stroke="#5b9bff" strokeWidth="1.7" />
     </svg>
+  );
+}
+
+function Wordmark({ size = "text-[15px]" }: { size?: string }): React.ReactElement {
+  return (
+    <span className={`font-semibold uppercase leading-none tracking-[0.2em] text-ink-100 ${size}`}>
+      Atlas
+    </span>
   );
 }
 
@@ -165,9 +174,10 @@ export function SiteHeader({ onMenu }: { onMenu: () => void }): React.ReactEleme
       {/* Desktop: three zones — brand left, nav geometrically centered, actions right */}
       <div className="mx-auto hidden h-14 max-w-7xl grid-cols-[1fr_auto_1fr] items-center gap-3 px-4 sm:px-6 lg:grid">
         <div className="flex min-w-0 items-center justify-start">
-          <a href="#/" className="flex shrink-0 items-center gap-2" aria-label="Atlas home">
+          <a href="#/" className="flex shrink-0 items-center gap-2.5" aria-label="Atlas home">
             <BrandMark />
-            <span className="text-[15px] font-semibold tracking-wide">Atlas</span>
+            <span aria-hidden className="h-5 w-px bg-graphite-700" />
+            <Wordmark />
             <span className="hidden rounded-full border border-graphite-700 px-1.5 py-px font-mono text-[10px] text-ink-500 xl:inline">
               v0.1 experimental
             </span>
@@ -220,9 +230,10 @@ export function SiteHeader({ onMenu }: { onMenu: () => void }): React.ReactEleme
         >
           <Menu size={18} aria-hidden />
         </button>
-        <a href="#/" className="flex shrink-0 items-center gap-2" aria-label="Atlas home">
+        <a href="#/" className="flex shrink-0 items-center gap-2.5" aria-label="Atlas home">
           <BrandMark />
-          <span className="text-[15px] font-semibold tracking-wide">Atlas</span>
+          <span aria-hidden className="h-5 w-px bg-graphite-700" />
+          <Wordmark size="text-[13px]" />
         </a>
         <div className="ml-auto flex items-center gap-2">
           <ThemeToggle />
@@ -310,9 +321,10 @@ export function MobileNav({ open, onClose }: { open: boolean; onClose: () => voi
       <div className="absolute inset-0 bg-black/60" onClick={onClose} aria-hidden />
       <div ref={panelRef} className="absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col border-r border-graphite-800 bg-graphite-925 p-4">
         <div className="flex items-center justify-between">
-          <span className="flex items-center gap-2">
+          <span className="flex items-center gap-2.5">
             <BrandMark />
-            <span className="text-sm font-semibold">Atlas</span>
+            <span aria-hidden className="h-5 w-px bg-graphite-700" />
+            <Wordmark size="text-[14px]" />
           </span>
           <button type="button" onClick={onClose} aria-label="Close navigation" className="rounded-md p-1.5 text-ink-300 hover:bg-graphite-800">
             <X size={18} aria-hidden />
