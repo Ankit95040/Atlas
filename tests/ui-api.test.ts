@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { disconnectDatabase, getPrismaClient } from "../src/db/client.js";
 import { createFeature, createProject, createRepository, createTask, transitionTask } from "../src/core/service.js";
 import { createUiServer } from "../src/ui/serve.js";
-import { ApiHomeSchema, ApiRunSummarySchema } from "../src/ui/api.js";
+import { ApiActivitySchema, ApiGlobalWorkerSchema, ApiHomeSchema, ApiProjectSchema, ApiRunSummarySchema, ApiWorkspaceSchema } from "../src/ui/api.js";
 import { track, uniqueName } from "./domain-helpers.js";
 import { initTempRepo } from "./git-helpers.js";
 
@@ -77,6 +77,47 @@ describe("read-only JSON API for the React frontend (M26 PoC)", () => {
     expect(Array.isArray(scene["buildings"])).toBe(true);
     expect(Array.isArray(scene["paths"])).toBe(true);
     expect(Array.isArray(scene["cars"])).toBe(true);
+  });
+
+  it("serves /api/workers as a list of ApiGlobalWorker", async () => {
+    await seedApiRun();
+    const { status, body } = await getJson("/api/workers");
+    expect(status).toBe(200);
+    const data = (body as { data: unknown[] }).data;
+    expect(Array.isArray(data)).toBe(true);
+    for (const row of data) {
+      expect(ApiGlobalWorkerSchema.safeParse(row).success).toBe(true);
+    }
+  });
+
+  it("serves /api/activity as a list of ApiActivity", async () => {
+    await seedApiRun();
+    const { status, body } = await getJson("/api/activity");
+    expect(status).toBe(200);
+    expect(ApiActivitySchema.safeParse((body as { data: unknown }).data).success).toBe(true);
+  });
+
+  it("serves /api/run/:id/workspace matching the ApiWorkspace contract", async () => {
+    const { featureId } = await seedApiRun();
+    const { status, body } = await getJson(`/api/run/${featureId}/workspace`);
+    expect(status).toBe(200);
+    const parsed = ApiWorkspaceSchema.safeParse((body as { data: unknown }).data);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.summary.id).toBe(featureId);
+      expect(parsed.data.tasks.some((t) => t.title === "api-task")).toBe(true);
+    }
+  });
+
+  it("serves /api/projects as a list of ApiProject", async () => {
+    await seedApiRun();
+    const { status, body } = await getJson("/api/projects");
+    expect(status).toBe(200);
+    const data = (body as { data: unknown[] }).data;
+    expect(Array.isArray(data)).toBe(true);
+    for (const row of data) {
+      expect(ApiProjectSchema.safeParse(row).success).toBe(true);
+    }
   });
 
   it("rejects non-GET methods on the API (read-only)", async () => {

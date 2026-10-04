@@ -50,6 +50,12 @@ export interface TaskOutcome {
    * did not run (execution did not COMPLETE). Optional for compatibility.
    */
   readonly verificationMs?: number | null;
+  /**
+   * Wall-clock ms of the assignment span (M28.2: worker record + workspace
+   * worktree creation). Always set by runOneTask; optional for compatibility.
+   * Test-execution span is already on `testRun.durationMs` when tests ran.
+   */
+  readonly assignMs?: number | null;
 }
 
 export interface WaveLoopResult {
@@ -78,6 +84,12 @@ export interface WaveLoopResult {
    * runFeatureWaveLoop.
    */
   readonly schedulingMs?: readonly number[];
+  /**
+   * Sum of wall-clock ms spent inside `runMergeTrain` across all waves
+   * (M28.2; evolving mode integrates per wave, original mode once).
+   * Null when no integration ran. Optional for compatibility.
+   */
+  readonly trainMs?: number | null;
 }
 
 /**
@@ -105,7 +117,7 @@ export async function runFeatureWaveLoop(
   db: PrismaClient = getPrismaClient(),
 ): Promise<WaveLoopResult> {
   const input: RunFeatureWaveLoopInput = RunFeatureWaveLoopInputSchema.parse(raw);
-  const track = deps.track ?? ((): void => undefined);
+  const track = deps.track;
 
   const feature = await db.feature.findUnique({ where: { id: input.featureId } });
   if (feature === null) {
@@ -148,7 +160,7 @@ export async function runFeatureWaveLoop(
     poolIds = [];
     for (let index = 0; index < allTaskIds.length; index += 1) {
       const worker = await createWorker({}, db);
-      track("worker", worker.id);
+      track?.("worker", worker.id);
       poolIds.push(worker.id);
     }
     poolIds.sort();
@@ -160,6 +172,9 @@ export async function runFeatureWaveLoop(
   const outcomesByTask = new Map<string, TaskOutcome>();
   const waveBases: string[] = [];
   const schedulingMs: number[] = [];
+  // M28.2: summed merge-train wall time across all integrations (evolving
+  // per-wave trains plus the final train). Null until one runs.
+  let trainMs: number | null = null;
   // Tasks already announced as scheduled (M19.5: exactly-once TASK_SCHEDULED
   // per task even though planning re-runs every round).
   const scheduledTaskIds = new Set<string>();
@@ -223,8 +238,9 @@ export async function runFeatureWaveLoop(
         continue;
       }
       const waveTrainApproval = await createApproval({ featureId: feature.id }, db);
-      track("approval", waveTrainApproval.id);
+      track?.("approval", waveTrainApproval.id);
       await decideApproval(waveTrainApproval.id, { decision: "APPROVED", actor: input.approvalActor }, db);
+      const waveTrainStart = Date.now();
       const waveTrain = await runMergeTrain(
         {
           repositoryId: repository.id,
@@ -243,6 +259,7 @@ export async function runFeatureWaveLoop(
         },
         db,
       );
+      trainMs = (trainMs ?? 0) + (Date.now() - waveTrainStart);
       await trackTaskEvidence(
         db,
         track,
@@ -288,7 +305,7 @@ export async function runFeatureWaveLoop(
             },
             db,
           );
-          track("artifact", triage.evidenceRefs.artifactId);
+          track?.("artifact", triage.evidenceRefs.artifactId);
         } catch {
           triage = null;
         }
@@ -331,8 +348,7 @@ export async function runFeatureWaveLoop(
           outcomes,
           train: null,
           triage: null,
-          waveBases,
-          schedulingMs,
+          trainMs,
         };
       }
       // No integration happened (e.g., all verified waves had empty diffs) — fallback to null.
@@ -351,6 +367,7 @@ export async function runFeatureWaveLoop(
         triage: lastTriage,
         waveBases,
         schedulingMs,
+        trainMs,
       };
     }
     await trackTaskEvidence(db, track, outcomes.map((o) => o.taskId));
@@ -368,6 +385,7 @@ export async function runFeatureWaveLoop(
       triage: lastTriage,
       waveBases,
       schedulingMs,
+      trainMs,
     };
   }
 
@@ -378,11 +396,11 @@ export async function runFeatureWaveLoop(
       { type: "RUN_COMPLETED", featureId: feature.id, actor: "atlas-wave-loop", payload: { waves: waves.length, outcomes: outcomes.length, trainStatus: null } },
       db,
     );
-    return { featureId: feature.id, repositoryId: repository.id, baseCommit: input.baseCommit, waves, outcomes, train: null, triage: null, waveBases, schedulingMs };
+    return { featureId: feature.id, repositoryId: repository.id, baseCommit: input.baseCommit, waves, outcomes, train: null, triage: null, waveBases, schedulingMs, trainMs };
   }
 
   const trainApproval = await createApproval({ featureId: feature.id }, db);
-  track("approval", trainApproval.id);
+  track?.("approval", trainApproval.id);
   await decideApproval(trainApproval.id, { decision: "APPROVED", actor: input.approvalActor }, db);
 
   const ordered = [...verified].sort((a, b) => {
@@ -393,6 +411,7 @@ export async function runFeatureWaveLoop(
     }
     return a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0;
   });
+  const finalTrainStart = Date.now();
   const train = await runMergeTrain(
     {
       repositoryId: repository.id,
@@ -411,6 +430,7 @@ export async function runFeatureWaveLoop(
     },
     db,
   );
+  trainMs = (trainMs ?? 0) + (Date.now() - finalTrainStart);
   await trackTaskEvidence(db, track, outcomes.map((outcome) => outcome.taskId));
   // Thin M13 post-halt hook: attach read-only triage evidence. Triage can
   // only observe — a triage failure degrades to null and never alters the
@@ -436,7 +456,7 @@ export async function runFeatureWaveLoop(
         },
         db,
       );
-      track("artifact", triage.evidenceRefs.artifactId);
+      track?.("artifact", triage.evidenceRefs.artifactId);
     } catch {
       triage = null;
     }
@@ -445,7 +465,7 @@ export async function runFeatureWaveLoop(
     { type: "RUN_COMPLETED", featureId: feature.id, actor: "atlas-wave-loop", payload: { waves: waves.length, outcomes: outcomes.length, trainStatus: train.status } },
     db,
   );
-  return { featureId: feature.id, repositoryId: repository.id, baseCommit: input.baseCommit, waves, outcomes, train, triage, waveBases, schedulingMs };
+  return { featureId: feature.id, repositoryId: repository.id, baseCommit: input.baseCommit, waves, outcomes, train, triage, waveBases, schedulingMs, trainMs };
 }
 
 /**
@@ -455,23 +475,29 @@ export async function runFeatureWaveLoop(
  * task (event, testRun, artifact, commit) mirrors the benchmark harness so
  * reverse-order deletion removes children first.
  */
-async function trackTaskEvidence(
+export async function trackTaskEvidence(
   db: PrismaClient,
-  track: (model: string, id: string) => void,
+  track: ((model: string, id: string) => void) | undefined,
   taskIds: Iterable<string>,
 ): Promise<void> {
-  for (const taskId of taskIds) {
+  // M29.1: test-hygiene enumeration only. Production passes no tracker, so
+  // skip the four per-task evidence queries entirely instead of fetching
+  // rows only to discard them. Zero behavior change: a noop tracker
+  // consumed exactly these results before. Exported for focused tests.
+  if (track === undefined) {
+    return;
+  }  for (const taskId of taskIds) {
     for (const row of await db.event.findMany({ where: { taskId }, select: { id: true } })) {
-      track("event", row.id);
+      track?.("event", row.id);
     }
     for (const row of await db.testRun.findMany({ where: { taskId }, select: { id: true } })) {
-      track("testRun", row.id);
+      track?.("testRun", row.id);
     }
     for (const row of await db.artifact.findMany({ where: { taskId }, select: { id: true } })) {
-      track("artifact", row.id);
+      track?.("artifact", row.id);
     }
     for (const row of await db.commit.findMany({ where: { taskId }, select: { id: true } })) {
-      track("commit", row.id);
+      track?.("commit", row.id);
     }
   }
 }
@@ -480,16 +506,17 @@ async function runOneTask(
   db: PrismaClient,
   input: RunFeatureWaveLoopInput,
   deps: WaveLoopDependencies,
-  track: (model: string, id: string) => void,
+  track: ((model: string, id: string) => void) | undefined,
   taskId: string,
   workerId: string,
   waveBase?: string,
 ): Promise<TaskOutcome> {
   const baseCommit = waveBase ?? input.baseCommit;
   const approval = await createApproval({ taskId }, db);
-  track("approval", approval.id);
+  track?.("approval", approval.id);
   await decideApproval(approval.id, { decision: "APPROVED", actor: input.approvalActor }, db);
 
+  const assignStart = Date.now();
   const assignment = await assignTaskToWorker(
     {
       taskId,
@@ -500,7 +527,8 @@ async function runOneTask(
     },
     db,
   );
-  track("workspace", assignment.workspace.id);
+  const assignMs = Date.now() - assignStart;
+  track?.("workspace", assignment.workspace.id);
 
   const workerStart = Date.now();
   const execution = await executeTask(
@@ -510,7 +538,7 @@ async function runOneTask(
   );
   const workerMs = Date.now() - workerStart;
   if (execution.status !== "COMPLETED") {
-    return { taskId, workerId, execution, testRun: null, verification: null, workerMs, verificationMs: null };
+    return { taskId, workerId, execution, testRun: null, verification: null, workerMs, verificationMs: null, assignMs };
   }
 
   const testRun = await runTests(
@@ -521,7 +549,7 @@ async function runOneTask(
     },
     db,
   );
-  track("testRun", testRun.testRunId);
+  track?.("testRun", testRun.testRunId);
 
   const verificationStart = Date.now();
   const verification = await verifyExecution(
@@ -532,5 +560,5 @@ async function runOneTask(
   if (verification.verdict === "VERIFIED") {
     await transitionTask(taskId, "COMPLETED", db);
   }
-  return { taskId, workerId, execution, testRun, verification, workerMs, verificationMs };
+  return { taskId, workerId, execution, testRun, verification, workerMs, verificationMs, assignMs };
 }

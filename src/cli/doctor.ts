@@ -58,7 +58,7 @@ export async function checkDocker(dockerBinary = "docker"): Promise<DoctorCheck>
 export function checkConfiguration(env: NodeJS.ProcessEnv = process.env): DoctorCheck {
   try {
     const config = loadConfig(env);
-    return { name: "Configuration", ok: true, detail: `env=${config.nodeEnv} db=${config.databaseUrl}` };
+    return { name: "Configuration", ok: true, detail: `env=${config.nodeEnv} db=${config.databaseUrl} (state: ${config.stateSource})` };
   } catch (error) {
     return { name: "Configuration", ok: false, detail: (error as Error).message };
   }

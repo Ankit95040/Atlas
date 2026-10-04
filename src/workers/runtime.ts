@@ -10,6 +10,7 @@ import { getTaskClaims } from "../claims/service.js";
 import { getCurrentCommit, getRepositoryRoot, getWorktree } from "../git/index.js";
 import { getWorktreeChanges } from "../git/diff.js";
 import { CommandFailureError } from "./command-provider.js";
+import type { ProviderUsage } from "./usage.js";
 import type { WorkerProvider } from "./provider.js";
 import {
   ExecuteTaskInput,
@@ -214,6 +215,12 @@ export async function executeTask(
     );
   }
 
+  // Observed provider usage is persisted as telemetry only (M28.9), on
+  // every outcome path including later failures: the write is best-effort
+  // and isolated, so metering can never change execution success, failure
+  // classification, or recovery eligibility.
+  await recordProviderUsage(db, task, parsed.data.usage);
+
   // Inspect actual changes from Git itself. Provider self-reports are ignored.
   let changes: Awaited<ReturnType<typeof getWorktreeChanges>>;
   try {
@@ -309,6 +316,33 @@ function terminalContext(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Persist observed provider usage as an append-only telemetry event
+ * (M28.9). Failure-isolated by contract: metering observes execution and
+ * must never alter its outcome, so every error path is swallowed here.
+ * Absent usage (null) records nothing — unknown stays absent, never a
+ * zero-filled row. Exported for focused unit tests.
+ */
+export async function recordProviderUsage(db: PrismaClient, task: Task, usage: ProviderUsage | undefined): Promise<void> {
+  if (usage === undefined) {
+    return;
+  }
+  try {
+    await recordEvent(
+      {
+        type: "PROVIDER_USAGE_OBSERVED",
+        featureId: task.featureId,
+        taskId: task.id,
+        actor: "atlas-metering",
+        payload: { usage },
+      },
+      db,
+    );
+  } catch {
+    // Telemetry only: a failed usage write must not fail the task.
+  }
 }
 
 async function failExecution(

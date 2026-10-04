@@ -7,8 +7,35 @@ import type { RepositoryStatus } from "./types.js";
 /**
  * Resolve the repository root for any path inside a working tree.
  * Throws NotGitRepositoryError when Git does not consider it a repository.
+ *
+ * M28.3: results are memoized per input path for the process lifetime.
+ * The mapping path→root is immutable while the process runs (repositories
+ * are never moved mid-run; deletion surfaces as failures in the subsequent
+ * git operations callers already perform). Only successes are cached —
+ * failures always re-execute, so error semantics (including
+ * NotGitRepositoryError) are unchanged. This eliminates ~25 redundant
+ * `rev-parse --show-toplevel` spawns per single-task run; HEAD, diff, and
+ * worktree-list reads stay live deliberately (agents and the train mutate
+ * those between reads).
  */
+const rootCache = new Map<string, Promise<string>>();
+
 export async function getRepositoryRoot(path: string): Promise<string> {
+  const cached = rootCache.get(path);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const pending = resolveRoot(path);
+  rootCache.set(path, pending);
+  try {
+    return await pending;
+  } catch (error) {
+    rootCache.delete(path);
+    throw error;
+  }
+}
+
+async function resolveRoot(path: string): Promise<string> {
   try {
     const result = await runGit(["rev-parse", "--show-toplevel"], { cwd: path });
     return result.stdout.trim();

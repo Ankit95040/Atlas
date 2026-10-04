@@ -19,6 +19,8 @@ const EXPECTED_KINDS: Record<string, string> = {
   "realistic-mixed": "REALISTIC_MIXED",
   "realistic-false-parallelism": "REALISTIC_FALSE_PARALLELISM",
   "realistic-order-sensitive": "REALISTIC_INTEGRATION_CONFLICT",
+  "realistic-migration": "REALISTIC_MIGRATION",
+  "realistic-inplace-refactor": "REALISTIC_MIXED",
 };
 
 async function treeContents(dir: string): Promise<Array<[string, string]>> {
@@ -32,7 +34,7 @@ async function treeContents(dir: string): Promise<Array<[string, string]>> {
 }
 
 describe("real benchmark workloads", () => {
-  it("lists the six built-in workloads with the right kinds", () => {
+  it("lists the eight built-in workloads with the right kinds", () => {
     expect(listWorkloadIds()).toEqual(Object.keys(EXPECTED_KINDS).sort());
     for (const id of listWorkloadIds()) {
       const workload = getWorkload(id);

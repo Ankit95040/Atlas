@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import type { WorkerExecutionInput } from "./types.js";
 import type { WorkerProvider } from "./provider.js";
+import { extractProviderUsage } from "./usage.js";
 
 /**
  * Configuration for {@link CommandWorkerProvider}. Strict: unknown keys
@@ -354,10 +355,14 @@ export class CommandWorkerProvider implements WorkerProvider {
     const notes = [`stdout:\n${stdout}`, `stderr:\n${stderr}`].join("\n");
     // Single-line Atlas-built summary: child-controlled bytes (argument
     // values, let alone stdout) must never shape control-plane records.
+    // Usage is parsed from the same observed bytes by Atlas itself (M28.9):
+    // informational telemetry, validated by schema, never evidence.
     const argv = this.config.command.join(" ").replace(/\s+/g, " ");
+    const usage = extractProviderUsage(observed.stdout);
     return {
       summary: `command-worker: ${argv} exit 0`,
       notes,
+      ...(usage === null ? {} : { usage }),
     };
   }
 }

@@ -1,0 +1,560 @@
+@import "tailwindcss";
+
+/* Atlas docs design system (M30.0).
+ *
+ * Continuity with the Atlas graphite instrument (ink/graphite/ok/warn/bad
+ * carry identical meaning), elevated for long-form reading: Inter for UI
+ * and prose, JetBrains Mono for code, a violet companion accent reserved
+ * for research content. Depth from layered surfaces + 1px borders — no
+ * glass, no gradients, no decorative animation.
+ */
+@theme {
+  --color-graphite-950: #0b0e14;
+  --color-graphite-925: #0d1017;
+  --color-graphite-900: #11151c;
+  --color-graphite-850: #161b24;
+  --color-graphite-800: #1e242e;
+  --color-graphite-700: #2a313c;
+  --color-ink-100: #e8edf3;
+  --color-ink-300: #9aa4b2;
+  --color-ink-500: #6b7482;
+  --color-ink-600: #4b5260;
+  --color-accent-500: #2f7cf6;
+  --color-accent-400: #5b9bff;
+  --color-accent-dim: rgba(47, 124, 246, 0.12);
+  --color-research-500: #8b5cf6;
+  --color-research-400: #a78bfa;
+  --color-research-dim: rgba(139, 92, 246, 0.12);
+  --color-ok-500: #3fb950;
+  --color-ok-400: #3fb950;
+  --color-warn-500: #d29922;
+  --color-warn-text: #e2a63d;
+  --color-bad-500: #f85149;
+  --font-sans: "Inter", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --radius-card: 10px;
+  --radius-control: 6px;
+}
+
+/* Light theme: premium editorial engineering — warm ivory paper, deep ink
+ * typography, architectural blueprint accents. Same token names; dark theme
+ * values above are untouched. Applied via [data-theme] on <html>; the
+ * `light` class fallback covers no-JS first paint. */
+html[data-theme="light"],
+html.light {
+  --color-graphite-950: #f7f8fc;
+  --color-graphite-925: #fdfdff;
+  --color-graphite-900: #f1f4fa;
+  --color-graphite-850: #e9edf6;
+  --color-graphite-800: #dfe4f0;
+  --color-graphite-700: #c3cbdf;
+  --color-ink-100: #101a2e;
+  --color-ink-300: #3c475e;
+  --color-ink-500: #5d687f;
+  --color-ink-600: #8b94ab;
+  --color-accent-500: #1d5fd0;
+  --color-accent-400: #1d5fd0;
+  --color-accent-dim: rgba(29, 95, 208, 0.08);
+  --color-research-500: #6d3fd4;
+  --color-research-400: #6d3fd4;
+  --color-research-dim: rgba(109, 63, 212, 0.08);
+  --color-ok-500: #1e7e34;
+  --color-ok-400: #1e7e34;
+  --color-warn-500: #9a6b0f;
+  --color-warn-text: #7d570c;
+  --color-bad-500: #cf222e;
+}
+
+html {
+  color-scheme: dark;
+  scroll-behavior: smooth;
+}
+
+html[data-theme="light"],
+html.light {
+  color-scheme: light;
+}
+
+body {
+  background-color: var(--color-graphite-950);
+  color: var(--color-ink-100);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Vision illustration: selected-path pulse. Still under the global
+ * prefers-reduced-motion rule, which zeroes the animation. The map is
+ * fully legible as a static diagram (structure, labels, legend). */
+.vision-edge {
+  transition: stroke 160ms ease, stroke-width 160ms ease;
+}
+.vision-edge-active {
+  animation: vision-pulse 1.6s ease-in-out infinite;
+}
+@keyframes vision-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* Mission-control diagram palette: CSS variables so the SVG adapts to
+ * the light theme. Dark values match the graphite instrument. */
+.mission {
+  --mc-surface: #0d1017;
+  --mc-panel: #11151c;
+  --mc-raised: #161b24;
+  --mc-car: #1e242e;
+  --mc-line: #2a313c;
+  --mc-trace: #333d4e;
+  --mc-grid: #1a2130;
+  --mc-text: #e8edf3;
+  --mc-sub: #9aa4b2;
+  --mc-faint: #6b7482;
+  --mc-dim: #4b5260;
+  --mc-blue: #2f7cf6;
+  --mc-blue-soft: #5b9bff;
+  --mc-violet: #8b5cf6;
+  --mc-violet-soft: #a78bfa;
+  --mc-green: #3fb950;
+  --mc-amber: #d29922;
+  --mc-amber-text: #e2a63d;
+}
+html[data-theme="light"] .mission,
+html.light .mission {
+  --mc-surface: #f2f5fd;
+  --mc-panel: #ffffff;
+  --mc-raised: #ffffff;
+  --mc-car: #e8edf8;
+  --mc-line: #c9d3e8;
+  --mc-trace: #a9b6d4;
+  --mc-grid: #dde4f3;
+  --mc-text: #101a2e;
+  --mc-sub: #3c475e;
+  --mc-faint: #5d687f;
+  --mc-dim: #8b94ab;
+  --mc-blue: #1d5fd0;
+  --mc-blue-soft: #1d5fd0;
+  --mc-violet: #6d3fd4;
+  --mc-violet-soft: #6d3fd4;
+  --mc-green: #1e7e34;
+  --mc-amber: #9a6b0f;
+  --mc-amber-text: #7d570c;
+}
+
+.display-hero {
+  font-size: clamp(2.25rem, 5vw, 3.75rem);
+  font-weight: 650;
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+}
+
+.display-section {
+  font-size: clamp(1.4rem, 2.6vw, 1.9rem);
+  font-weight: 620;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+}
+
+.display-title {
+  font-size: 1.375rem;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+}
+
+.micro-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+
+/* Prose article typography */
+.prose-atlas h2 {
+  font-size: 1.35rem;
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  margin-top: 2.5rem;
+  margin-bottom: 0.75rem;
+  scroll-margin-top: 5.5rem;
+}
+.prose-atlas h3 {
+  font-size: 1.08rem;
+  font-weight: 600;
+  margin-top: 1.75rem;
+  margin-bottom: 0.5rem;
+  scroll-margin-top: 5.5rem;
+}
+.prose-atlas p {
+  margin: 0.85rem 0;
+  color: var(--color-ink-100);
+}
+.prose-atlas ul,
+.prose-atlas ol {
+  margin: 0.85rem 0;
+  padding-left: 1.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.prose-atlas ul {
+  list-style: disc;
+}
+.prose-atlas ol {
+  list-style: decimal;
+}
+.prose-atlas li::marker {
+  color: var(--color-ink-500);
+}
+.prose-atlas table {
+  width: 100%;
+  font-size: 0.875rem;
+  border: 1px solid var(--color-graphite-800);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+  margin: 1.25rem 0;
+}
+.prose-atlas thead tr {
+  background-color: var(--color-graphite-900);
+  text-align: left;
+}
+.prose-atlas th {
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--color-ink-500);
+  padding: 0.6rem 0.85rem;
+}
+.prose-atlas td {
+  padding: 0.6rem 0.85rem;
+  border-top: 1px solid var(--color-graphite-800);
+  vertical-align: top;
+}
+.prose-atlas code:not(pre code) {
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  background-color: var(--color-graphite-800);
+  border: 1px solid var(--color-graphite-700);
+  border-radius: 5px;
+  padding: 0.1em 0.38em;
+  white-space: nowrap;
+}
+.prose-atlas a {
+  color: var(--color-accent-400);
+}
+.prose-atlas a:hover {
+  text-decoration: underline;
+}
+.prose-atlas strong {
+  font-weight: 620;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent-500);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* ————————————————————————————————————————————————————————————————
+ * LIGHT THEME: premium atmospheric editorial engineering experience.
+ * Dark theme is intentionally untouched — every rule below is scoped to
+ * html[data-theme="light"] / html.light.
+ *
+ * System:
+ *  1. Layered ivory page background with faint architectural texture.
+ *  2. Hero atmosphere: broad, extremely subtle blue + violet illumination.
+ *  3. Section rhythm: ivory → cooler blue-white → softly tinted panels.
+ *  4. Blueprint-framed MissionControl: elevated surface, fine grid,
+ *     delicate border + soft outer shadow + inner highlight.
+ *  5. Ink typography hierarchy; blue/violet reserved for meaning.
+ * —————————————————————————————————————————————————————————————— */
+
+html[data-theme="light"] body,
+html.light body {
+  background-color: #f7f8fc;
+  background-image:
+    radial-gradient(1100px 480px at 50% -120px, rgba(29, 95, 208, 0.07), transparent 70%),
+    radial-gradient(900px 420px at 85% 8%, rgba(109, 63, 212, 0.05), transparent 70%),
+    linear-gradient(rgba(29, 95, 208, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(29, 95, 208, 0.025) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    100% 100%,
+    56px 56px,
+    56px 56px;
+  background-position:
+    0 0,
+    0 0,
+    0 0,
+    0 0;
+  color: #101a2e;
+}
+
+/* Fade the page-wide grid so it never competes with text: strongest near
+ * the top, dissolving as the reader scrolls. Implemented as a mask on a
+ * fixed overlay would need markup; instead keep grid opacity ultra-low. */
+html[data-theme="light"] #root > div,
+html.light #root > div {
+  background-image:
+    radial-gradient(1200px 520px at 50% -140px, rgba(29, 95, 208, 0.06), transparent 70%),
+    radial-gradient(760px 380px at 82% 240px, rgba(109, 63, 212, 0.055), transparent 70%);
+  background-repeat: no-repeat;
+}
+
+/* —— Hero composition ——————————————————————————————— */
+html[data-theme="light"] .hero-atlas,
+html.light .hero-atlas {
+  position: relative;
+  background:
+    radial-gradient(1000px 440px at 30% 0%, rgba(29, 95, 208, 0.09), transparent 68%),
+    radial-gradient(640px 340px at 78% 22%, rgba(109, 63, 212, 0.07), transparent 70%),
+    linear-gradient(180deg, #fbfbfe 0%, #f7f8fc 55%, #f7f8fc 100%);
+  border-bottom: 1px solid #e2e7f2;
+}
+
+html[data-theme="light"] .hero-atlas::before,
+html.light .hero-atlas::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(29, 95, 208, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(29, 95, 208, 0.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(720px 420px at 50% 30%, black 30%, transparent 78%);
+  -webkit-mask-image: radial-gradient(720px 420px at 50% 30%, black 30%, transparent 78%);
+}
+
+html[data-theme="light"] .hero-atlas > div,
+html.light .hero-atlas > div {
+  position: relative;
+}
+
+/* Oversized headline: deep ink with a restrained blue accent word. */
+html[data-theme="light"] .display-hero,
+html.light .display-hero {
+  color: #0e1830;
+  text-wrap: balance;
+}
+
+html[data-theme="light"] .hero-atlas .display-hero span,
+html.light .hero-atlas .display-hero span {
+  color: #1d5fd0;
+}
+
+/* Eyebrow + lede tuning for editorial calm. */
+html[data-theme="light"] .hero-atlas .micro-label,
+html.light .hero-atlas .micro-label {
+  color: #1d5fd0;
+  letter-spacing: 0.11em;
+}
+
+/* —— Blueprint-framed MissionControl ————————————————————————— */
+html[data-theme="light"] .mission-frame,
+html.light .mission-frame {
+  position: relative;
+  border: 1px solid #d7deef;
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0) 18%),
+    #f2f5fd;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 24px 60px -28px rgba(29, 60, 140, 0.28),
+    0 4px 14px -6px rgba(29, 60, 140, 0.12);
+  padding: clamp(10px, 2vw, 20px);
+  overflow: hidden;
+}
+
+html[data-theme="light"] .mission-frame::before,
+html.light .mission-frame::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background-image:
+    linear-gradient(rgba(29, 95, 208, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(29, 95, 208, 0.055) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: radial-gradient(120% 100% at 50% 40%, black 55%, transparent 100%);
+  -webkit-mask-image: radial-gradient(120% 100% at 50% 40%, black 55%, transparent 100%);
+}
+
+html[data-theme="light"] .mission-frame svg.mission,
+html.light .mission-frame svg.mission {
+  position: relative;
+  border: 1px solid #dbe2f2;
+  border-radius: 10px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset;
+}
+
+/* Corner registration ticks: drafting-instrument detail. */
+html[data-theme="light"] .mission-frame::after,
+html.light .mission-frame::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  pointer-events: none;
+  border-radius: 8px;
+  background:
+    linear-gradient(#1d5fd0, #1d5fd0) left top / 14px 1.5px,
+    linear-gradient(#1d5fd0, #1d5fd0) left top / 1.5px 14px,
+    linear-gradient(#1d5fd0, #1d5fd0) right top / 14px 1.5px,
+    linear-gradient(#1d5fd0, #1d5fd0) right top / 1.5px 14px,
+    linear-gradient(#1d5fd0, #1d5fd0) left bottom / 14px 1.5px,
+    linear-gradient(#1d5fd0, #1d5fd0) left bottom / 1.5px 14px,
+    linear-gradient(#1d5fd0, #1d5fd0) right bottom / 14px 1.5px,
+    linear-gradient(#1d5fd0, #1d5fd0) right bottom / 1.5px 14px;
+  background-repeat: no-repeat;
+  opacity: 0.35;
+}
+
+/* —— Section rhythm (deliberate alternation, never cards-everywhere) —— */
+html[data-theme="light"] .section-ivory,
+html.light .section-ivory {
+  background: #f7f8fc;
+  border-bottom: 1px solid #e6eaf3;
+}
+
+html[data-theme="light"] .section-cool,
+html.light .section-cool {
+  background:
+    radial-gradient(900px 300px at 20% 0%, rgba(29, 95, 208, 0.05), transparent 70%),
+    #eef2f9;
+  border-bottom: 1px solid #dfe5f1;
+}
+
+html[data-theme="light"] .section-tint,
+html.light .section-tint {
+  background:
+    radial-gradient(700px 260px at 80% 0%, rgba(109, 63, 212, 0.05), transparent 70%),
+    #f3f1fd;
+  border-bottom: 1px solid #e3ddf6;
+}
+
+/* Sticky editorial ledger keeps its paper card, but quieter. */
+html[data-theme="light"] .ledger-card,
+html.light .ledger-card {
+  background: #fdfdff;
+  border: 1px solid #e2e7f2;
+  box-shadow: 0 12px 32px -20px rgba(29, 60, 140, 0.25);
+}
+
+/* Evidence chips: paper with hairline border, not dark pills. */
+html[data-theme="light"] .evidence-chip,
+html.light .evidence-chip {
+  background: #fbfbfe;
+  border: 1px solid #e2e7f2;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset;
+}
+
+/* —— Typography hierarchy ——————————————————————————————————— */
+html[data-theme="light"] .display-section,
+html.light .display-section {
+  color: #0e1830;
+  text-wrap: balance;
+}
+
+html[data-theme="light"] .display-title,
+html.light .display-title {
+  color: #0e1830;
+}
+
+html[data-theme="light"] .prose-atlas p,
+html.light .prose-atlas p {
+  color: #232f47;
+  line-height: 1.75;
+}
+
+html[data-theme="light"] .prose-atlas h2,
+html.light .prose-atlas h2,
+html[data-theme="light"] .prose-atlas h3,
+html.light .prose-atlas h3 {
+  color: #0e1830;
+}
+
+/* —— Navbar: frosted ivory instrument ————————————————————————— */
+html[data-theme="light"] header[role="banner"],
+html.light header[role="banner"] {
+  background: rgba(247, 248, 252, 0.88);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid #e2e7f2;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset;
+}
+
+/* —— Buttons: restrained, precise ————————————————————————————— */
+html[data-theme="light"] a[class*="bg-accent-500"],
+html.light a[class*="bg-accent-500"] {
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.25) inset,
+    0 8px 20px -10px rgba(29, 95, 208, 0.55);
+}
+
+/* —— Surfaces: docs nav, cards, search, code, research ————————— */
+html[data-theme="light"] input[type="search"],
+html.light input[type="search"] {
+  background: #fdfdff;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset;
+}
+
+html[data-theme="light"] pre,
+html.light pre {
+  background: #fbfbfe;
+}
+
+/* Code blocks read as paper instruments, not dark slabs. */
+html[data-theme="light"] .prose-atlas code:not(pre code),
+html.light .prose-atlas code:not(pre code) {
+  background: #eef1f8;
+  border-color: #d9dfee;
+  color: #1d2a44;
+}
+
+/* Journal-style evidence blocks: hairline rule + quiet tint. */
+html[data-theme="light"] div[role="note"],
+html.light div[role="note"] {
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset;
+}
+
+/* Research chart bars: keep data ink; soften the track. */
+html[data-theme="light"] figure[class*="bg-graphite-900"],
+html.light figure[class*="bg-graphite-900"] {
+  background: #fdfdff;
+  box-shadow: 0 12px 32px -24px rgba(29, 60, 140, 0.35);
+}
+
+/* Footer: cooler paper with a deliberate top rule. */
+html[data-theme="light"] footer,
+html.light footer {
+  background: #eef1f8;
+  border-top: 1px solid #dfe5f1;
+}
+
+/* Focus stays visible on paper. */
+html[data-theme="light"] :focus-visible,
+html.light :focus-visible {
+  outline: 2px solid #1d5fd0;
+  outline-offset: 2px;
+}

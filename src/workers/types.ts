@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { commitShaSchema, idSchema } from "../core/inputs.js";
+import { ProviderUsageSchema } from "./usage.js";
 import type { NormalizedClaim } from "../claims/types.js";
 
 // ---------- Runtime entry (Atlas-side; workspace path always comes from the DB) ----------
@@ -42,10 +43,17 @@ export const ProviderOutputSchema = z
     testsPassed: z.boolean().optional(),
     /** Informational only. Atlas recomputes actual changes from Git itself. */
     filesChanged: z.array(z.string().max(1000)).max(500).optional(),
+    /**
+     * Observed provider usage (M28.9). Atlas-attached from the child's own
+     * stdout envelope by CommandWorkerProvider — informational telemetry
+     * only, never verification evidence, never control input.
+     */
+    usage: ProviderUsageSchema.optional(),
   })
   .strict();
 
 export type ProviderOutput = z.infer<typeof ProviderOutputSchema>;
+export type { ProviderUsage, ProviderTokenUsage } from "./usage.js";
 
 // ---------- Provider failure classification (M19.2 structured evidence) ----------
 

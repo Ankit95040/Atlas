@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Atlas is an experimental control plane for orchestrating AI coding agents with isolation, verification, and human control."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%232f7cf6'/%3E%3C/svg%3E"
+    />
+    <title>Atlas — Control plane for AI coding agents</title>
+    <script>
+      // Theme bootstrap: applies the stored (or system) theme before first
+      // paint to avoid a flash of the wrong theme. Mirrors theme.ts logic.
+      (function () {
+        try {
+          var stored = window.localStorage.getItem("atlas-docs-theme");
+          var choice = stored === "dark" || stored === "light" || stored === "system" ? stored : "system";
+          var resolved =
+            choice === "system"
+              ? window.matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark"
+              : choice;
+          document.documentElement.dataset.theme = resolved;
+          document.documentElement.classList.toggle("light", resolved === "light");
+          document.documentElement.classList.toggle("dark", resolved !== "light");
+        } catch (e) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

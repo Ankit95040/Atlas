@@ -414,7 +414,201 @@ const BUILDERS: Record<string, () => RealWorkloadSpec> = {
   "realistic-mixed": realisticMixed,
   "realistic-false-parallelism": realisticFalseParallelism,
   "realistic-order-sensitive": realisticOrderSensitive,
+  "realistic-migration": realisticMigration,
+  "realistic-inplace-refactor": realisticInplaceRefactor,
 };
+
+/**
+ * M29.5 follow-up 1: in-place edits to one existing module with no declared
+ * dependencies. DAG-independent but file-coupled: both tasks WRITE
+ * src/calc.js while required to preserve each other's function byte-for-byte.
+ * Hypothesis under test: DAG independence does not imply merge independence.
+ * The shared-write classifier rule should flag this REQUIRES_REVIEW.
+ */
+export function realisticInplaceRefactor(): RealWorkloadSpec {
+  return defineWorkload({
+    id: "realistic-inplace-refactor",
+    name: "In-place hardening of one calculator module",
+    description: "Two tasks harden two functions in the same existing file without declared dependencies.",
+    kind: "REALISTIC_MIXED",
+    featureSpec: { title: "Calculator hardening", description: "Harden add and mul in place." },
+    features: [{ key: "feat", title: "Hardening" }],
+    baseFiles: [
+      {
+        path: "src/calc.js",
+        content: `export function add(a, b) {
+  return a + b;
+}
+export function mul(a, b) {
+  return a * b;
+}
+`,
+      },
+    ],
+    testFiles: [
+      {
+        // Lenient-per-function pattern (same as realistic-mixed): each test
+        // mandates correct behavior and tolerates the sibling hardened or
+        // not. Per-task verification can therefore pass in isolation; the
+        // success predicate's non-empty-diff rule remains the anti-free-ride
+        // guard. A strict suite would reject every task until its sibling
+        // lands, which would measure fixture design, not merge behavior.
+        path: "test/calc.test.mjs",
+        content: `import test from "node:test";
+import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+test("add adds; hardened add rejects non-numbers", async () => {
+  if (!existsSync("src/calc.js")) return;
+  const { add } = await import("../src/calc.js");
+  assert.equal(add(1, 2), 3);
+  try {
+    add(1, "x");
+  } catch (err) {
+    assert.match(String(err && err.message || err), /number/);
+  }
+});
+test("mul multiplies; hardened mul rejects non-numbers", async () => {
+  if (!existsSync("src/calc.js")) return;
+  const { mul } = await import("../src/calc.js");
+  assert.equal(mul(2, 3), 6);
+  try {
+    mul(1, "x");
+  } catch (err) {
+    assert.match(String(err && err.message || err), /number/);
+  }
+});
+`,
+      },
+    ],
+    testCommand: NODE_TEST,
+    tasks: [
+      {
+        key: "harden-add",
+        title: "Harden add in place",
+        description:
+          "In the existing src/calc.js, make add(a, b) throw an Error mentioning numbers " +
+          "unless both arguments are numbers. Preserve the mul function byte-for-byte. " +
+          "Then run node --test and commit.",
+        featureKey: "feat",
+        claims: [{ resource: "src/calc.js", access: "WRITE" }],
+        dependsOn: [],
+      },
+      {
+        key: "harden-mul",
+        title: "Harden mul in place",
+        description:
+          "In the existing src/calc.js, make mul(a, b) throw an Error mentioning numbers " +
+          "unless both arguments are numbers. Preserve the add function byte-for-byte. " +
+          "Then run node --test and commit.",
+        featureKey: "feat",
+        claims: [{ resource: "src/calc.js", access: "WRITE" }],
+        dependsOn: [],
+      },
+    ],
+    expectedOutcome:
+      "DAG-independent but file-coupled: single-agent applies both edits serially; " +
+      "Atlas parallel execution risks a merge conflict despite the empty dependency graph.",
+  });
+}
+
+/**
+ * Class 5 (M28.8): schema/migration with elevated verification. A v2 user
+ * schema, a pure migration function over a JSON dataset, and a reader —
+ * chained, with three test files (shape, idempotence, reader behavior).
+ * Deterministic and small; the elevated suite (not task count) is what
+ * makes verification expensive here.
+ */
+export function realisticMigration(): RealWorkloadSpec {
+  return defineWorkload({
+    id: "realistic-migration",
+    name: "User schema migration",
+    description: "Version the user schema, migrate the dataset, and update the reader.",
+    kind: "REALISTIC_MIGRATION",
+    featureSpec: { title: "User migration", description: "Migrate users to schema v2 and read them back." },
+    features: [{ key: "feat", title: "Migration" }],
+    baseFiles: [{ path: "data/users.json", content: `[{"name":"amy"},{"name":"bo"}]\n` }],
+    testFiles: [
+      {
+        path: "test/schema.test.mjs",
+        content: `import test from "node:test";
+import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+test("schema v2 requires name and email", async () => {
+  if (!existsSync("src/schema.js")) return;
+  const { userSchema } = await import("../src/schema.js");
+  assert.equal(userSchema.version, 2);
+  assert.deepEqual(userSchema.required, ["name", "email"]);
+});
+`,
+      },
+      {
+        path: "test/migrate.test.mjs",
+        content: `import test from "node:test";
+import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+test("migration backfills email and is idempotent", async () => {
+  if (!existsSync("scripts/migrate.mjs")) return;
+  const { migrate } = await import("../scripts/migrate.mjs");
+  const once = migrate([{ name: "amy" }], { required: ["name", "email"] });
+  assert.deepEqual(once, [{ name: "amy", email: "amy@example.com" }]);
+  assert.deepEqual(migrate(once, { required: ["name", "email"] }), once);
+});
+`,
+      },
+      {
+        path: "test/users.test.mjs",
+        content: `import test from "node:test";
+import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+test("reader lists missing fields per user", async () => {
+  if (!existsSync("src/users.js")) return;
+  const { missing } = await import("../src/users.js");
+  assert.deepEqual(missing({ name: "a" }, { required: ["name", "email"] }), ["email"]);
+  assert.deepEqual(missing({ name: "a", email: "b" }, { required: ["name", "email"] }), []);
+});
+`,
+      },
+    ],
+    testCommand: NODE_TEST,
+    tasks: [
+      {
+        key: "schema",
+        title: "Define schema v2",
+        description:
+          "Create src/schema.js exporting const userSchema = { version: 2, required: [\"name\", \"email\"] }. " +
+          "Then run node --test and commit.",
+        featureKey: "feat",
+        claims: [{ resource: "src/schema.js", access: "WRITE" }],
+        dependsOn: [],
+      },
+      {
+        key: "migrate",
+        title: "Write the migration function",
+        description:
+          "Create scripts/migrate.mjs exporting function migrate(users, schema), which returns a new " +
+          "array where every user missing a required key gains `${name}@example.com` as email; users " +
+          "already complete pass through unchanged (idempotent). Take the schema as a parameter. " +
+          "Then run node --test and commit.",
+        featureKey: "feat",
+        claims: [{ resource: "scripts/migrate.mjs", access: "WRITE" }],
+        dependsOn: ["schema"],
+      },
+      {
+        key: "reader",
+        title: "Write the reader",
+        description:
+          "Create src/users.js exporting function missing(obj, schema), returning the array of " +
+          "required keys absent from obj (empty array when complete). Then run node --test and commit.",
+        featureKey: "feat",
+        claims: [{ resource: "src/users.js", access: "WRITE" }],
+        dependsOn: ["migrate"],
+      },
+    ],
+    expectedOutcome:
+      "ATLAS waves are [[schema],[migrate],[reader]]; the three-file suite makes " +
+      "verification the dominant phase for this small graph.",
+  });
+}
 
 export function listWorkloadIds(): string[] {
   return Object.keys(BUILDERS).sort();

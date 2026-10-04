@@ -117,6 +117,9 @@ enum EventType {
   // M22: explicit human-driven task transitions out of stuck states
   // (VERIFICATION-stuck, orphaned IN_PROGRESS). Single allowed edges only.
   TASK_TRANSITIONED
+  // M28.9: observed provider usage (tokens/cost) attached to a task's
+  // execution. Telemetry only — never read by control-plane decisions.
+  PROVIDER_USAGE_OBSERVED
 }
 
 // ---------- Roots ----------

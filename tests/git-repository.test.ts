@@ -37,6 +37,19 @@ describe("git repository inspection", () => {
     await expect(validateRepository(dir)).rejects.toThrow(DomainError);
   });
 
+  it("memoizes root resolution per path without caching failures (M28.3)", async () => {
+    const repo = await initTempRepo();
+    const first = await getRepositoryRoot(repo);
+    const second = await getRepositoryRoot(repo);
+    expect(second).toBe(first);
+    // A failed lookup must not poison a later success for the same path:
+    // init the repo after the failure and resolution must succeed.
+    const dir = await makeTempDir();
+    await expect(validateRepository(dir)).rejects.toThrow(NotGitRepositoryError);
+    await runGit(["init", "-b", "main"], { cwd: dir });
+    expect(await getRepositoryRoot(dir)).toBe(dir);
+  });
+
   it("reads the current branch and commit", async () => {
     const repo = await initTempRepo();
     expect(await getCurrentBranch(repo)).toBe("main");

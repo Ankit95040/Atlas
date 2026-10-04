@@ -3,7 +3,15 @@ import "dotenv/config";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { PrismaClient } from "@prisma/client";
 import { getPrismaClient } from "../db/client.js";
-import { ApiHomeSchema, ApiRunSummarySchema, type ApiRunSummary } from "./api.js";
+import {
+  ApiActivitySchema,
+  ApiGlobalWorkerSchema,
+  ApiHomeSchema,
+  ApiProjectSchema,
+  ApiRunSummarySchema,
+  ApiWorkspaceSchema,
+  type ApiRunSummary,
+} from "./api.js";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -261,6 +269,29 @@ async function serveApi(response: ServerResponse, pathname: string, db: PrismaCl
     sendJson(response, 200, { ok: true as const, data: runs.map(toApiRun).map((r) => ApiRunSummarySchema.parse(r)) });
     return;
   }
+  if (pathname === "/api/workers") {
+    const workers = await loadAllWorkers(db);
+    sendJson(response, 200, { ok: true as const, data: workers.map((w) => ApiGlobalWorkerSchema.parse({ ...w })) });
+    return;
+  }
+  if (pathname === "/api/activity") {
+    const activity = await loadRecentEvents(db);
+    sendJson(response, 200, { ok: true as const, data: ApiActivitySchema.parse(activity) });
+    return;
+  }
+  if (pathname === "/api/projects") {
+    const projects = await loadProjects(db);
+    sendJson(response, 200, {
+      ok: true as const,
+      data: projects.map((p) => ApiProjectSchema.parse({ id: p.id, name: p.name, runCount: p.runCount })),
+    });
+    return;
+  }
+  const workspaceMatch = /^\/api\/run\/([^/]+)\/workspace$/.exec(pathname);
+  if (workspaceMatch?.[1] !== undefined) {
+    sendJson(response, 200, { ok: true as const, data: await loadWorkspacePayload(db, workspaceMatch[1]) });
+    return;
+  }
   const islandMatch = /^\/api\/run\/([^/]+)\/island$/.exec(pathname);
   if (islandMatch?.[1] !== undefined) {
     const graph = await loadWorkflow(db, islandMatch[1]);
@@ -271,8 +302,49 @@ async function serveApi(response: ServerResponse, pathname: string, db: PrismaCl
   sendJson(response, 404, { ok: false as const, error: `No API route for ${pathname}.` });
 }
 
-function toApiRun(r: {
-  id: string;
+async function loadWorkspacePayload(db: PrismaClient, featureId: string): Promise<unknown> {
+  const [hud, tasks, workers, verification, train, events, feature] = await Promise.all([
+    loadRunHud(db, featureId),
+    loadTasks(db, featureId),
+    loadWorkers(db, featureId),
+    loadVerification(db, featureId),
+    loadTrain(db, featureId),
+    loadEvents(db, featureId),
+    db.feature.findUnique({ where: { id: featureId }, include: { project: true } }),
+  ]);
+  if (feature === null) {
+    throw new Error(`unknown run scope: expected a feature ID, got ${JSON.stringify(featureId)}`);
+  }
+  return ApiWorkspaceSchema.parse({
+    summary: {
+      id: hud.featureId,
+      title: hud.title,
+      status: hud.status,
+      projectName: feature.project.name,
+      branch: train.branches[0]?.branch ?? null,
+      totalTasks: hud.totalTasks,
+      activeTasks: hud.activeTasks,
+      failedTasks: hud.failedTasks,
+      workerCount: hud.activeWorkers,
+      verifiedCount: hud.verifiedCount,
+      mergeCount: hud.integratedCount,
+      haltReason: hud.haltReason,
+    },
+    tasks,
+    workers,
+    verification,
+    train,
+    events: events.events.map((e) => ({
+      type: e.type,
+      taskId: e.taskId,
+      actor: e.actor,
+      createdAt: e.createdAt,
+      summary: e.summary,
+    })),
+  });
+}
+
+function toApiRun(r: {  id: string;
   title: string;
   status: string;
   projectId: string;

@@ -33,6 +33,7 @@ export const RealWorkloadKindSchema = z.enum([
   "REALISTIC_DEPENDENCY_CHAIN",
   "REALISTIC_MIXED",
   "REALISTIC_FALSE_PARALLELISM",
+  "REALISTIC_MIGRATION",
   "REALISTIC_INTEGRATION_CONFLICT",
 ]);
 
@@ -182,12 +183,22 @@ const agentProvenanceSchema = z
 const usageRecordSchema = z
   .object({
     /**
-     * Tokens/cost only when the agent CLI exposes them through a channel
-     * Atlas can observe. The M8/M11 boundary drops provider stdout, so with
-     * CommandWorkerProvider this is null: reported unknown, never estimated
-     * from wall-clock time.
+     * Observed provider token dimensions (M28.9: parsed from provider
+     * event envelopes, summed all-or-null across tasks). Null when any
+     * task lacks well-formed usage — unknown, never estimated. Full
+     * per-task rows persist as PROVIDER_USAGE_OBSERVED events.
      */
-    tokens: z.number().int().min(0).nullable(),
+    tokens: z
+      .object({
+        total: z.number().int().min(0).nullable(),
+        input: z.number().int().min(0).nullable(),
+        output: z.number().int().min(0).nullable(),
+        reasoning: z.number().int().min(0).nullable(),
+        cachedRead: z.number().int().min(0).nullable(),
+        cachedWrite: z.number().int().min(0).nullable(),
+      })
+      .strict()
+      .nullable(),
     costUsd: z.number().min(0).nullable(),
   })
   .strict();

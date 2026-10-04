@@ -1,10 +1,14 @@
 import { PrismaClient } from "@prisma/client";
+import { resolveDatabaseUrl } from "../config/state.js";
 
 let prisma: PrismaClient | undefined;
 
 export function getPrismaClient(): PrismaClient {
   if (prisma === undefined) {
-    prisma = new PrismaClient();
+    // M28.1: honor per-project state resolution without env mutation.
+    // With no DATABASE_URL and no .atlas/atlas.db above cwd this resolves
+    // to the legacy file:./dev.db — byte-identical behavior to before.
+    prisma = new PrismaClient({ datasourceUrl: resolveDatabaseUrl().databaseUrl });
   }
   return prisma;
 }

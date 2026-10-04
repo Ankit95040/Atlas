@@ -311,14 +311,14 @@ describe("3D click navigation (existing routes only)", () => {
   it("tags pickable entities and routes clicks to detail views", () => {
     const source = readFileSync(join(import.meta.dirname, "..", "src", "ui", "island3d", "client.ts"), "utf8");
     // Every interactive kind carries a navigation target on existing routes.
-    for (const kind of ["task", "worker", "gate", "car", "halt", "tower", "harbor"]) {
+    // (M27.5 removed the decorative tower: no entity, no route, no test.)
+    for (const kind of ["task", "worker", "gate", "car", "halt", "harbor"]) {
       expect(source, `missing entity tag: ${kind}`).toContain(`kind: "${kind}"`);
     }
     expect(source).toContain("view=tasks#task-");
     expect(source).toContain("view=workers#worker-");
     expect(source).toContain("view=verification");
     expect(source).toContain("view=train");
-    expect(source).toContain("view=overview");
     // Clicks require a press without drag; hover only changes the cursor.
     expect(source).toContain("pointerdown");
     expect(source).toContain("pointerup");

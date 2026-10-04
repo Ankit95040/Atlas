@@ -8,5 +8,5 @@ coverage/
 .vitest/
 test-results/
 apps/web/test-results/
-.DS_Store/
+.DS_Store
 *.log

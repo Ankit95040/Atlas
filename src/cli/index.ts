@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import { Command } from "commander";
+import type { PrismaClient } from "@prisma/client";
+import { PrismaClient as PrismaClientRuntime } from "@prisma/client";
 import { disconnectDatabase } from "../db/client.js";
+import { resolveExplicitStateDir } from "../config/state.js";
 import { formatDoctorResult, runDoctor } from "./doctor.js";
 import { runInitCommand } from "./init.js";
 import { EXIT_USAGE, writeCommandError, writeCommandOutput } from "./output.js";
@@ -51,6 +54,7 @@ export function createProgram(): Command {
     .option("--feature-description <text>", "Feature description")
     .option("--remote-url <url>", "Repository remote URL")
     .option("--default-branch <branch>", "Repository default branch")
+    .option("--state-dir <dir>", "Explicit per-project state directory (uses <dir>/atlas.db; must already be provisioned)")
     .option("--json", "Machine-readable output")
     .action(
       async (opts: {
@@ -61,9 +65,21 @@ export function createProgram(): Command {
         featureDescription?: string;
         remoteUrl?: string;
         defaultBranch?: string;
+        stateDir?: string;
         json?: boolean;
       }) => {
+        let stateDb: PrismaClient | undefined;
         try {
+          // M28.1: an explicit state dir gets a dedicated client so the
+          // ambient singleton (and its disconnect lifecycle) is untouched.
+          const dbOptions =
+            opts.stateDir === undefined
+              ? {}
+              :               (() => {
+                  const resolved = resolveExplicitStateDir(opts.stateDir);
+                  stateDb = new PrismaClientRuntime({ datasourceUrl: resolved.databaseUrl });
+                  return { db: stateDb, stateDatabaseUrl: resolved.databaseUrl };
+                })();
           const output = await runInitCommand({
             name: opts.name,
             repoPath: opts.repoPath,
@@ -72,13 +88,16 @@ export function createProgram(): Command {
             ...(opts.featureDescription !== undefined ? { featureDescription: opts.featureDescription } : {}),
             ...(opts.remoteUrl !== undefined ? { remoteUrl: opts.remoteUrl } : {}),
             ...(opts.defaultBranch !== undefined ? { defaultBranch: opts.defaultBranch } : {}),
+            ...dbOptions,
           });
           writeCommandOutput(output, opts.json === true);
           await disconnectDatabase();
+          await stateDb?.$disconnect();
           process.exitCode = output.exitCode;
         } catch (error) {
           writeCommandError(error, opts.json === true);
           await disconnectDatabase();
+          await stateDb?.$disconnect();
           process.exitCode = EXIT_USAGE;
         }
       },

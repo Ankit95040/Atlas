@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import { getPrismaClient } from "../db/client.js";
+import { resolveExplicitStateDir } from "../config/state.js";
 import { createFeature, createProject, createRepository } from "../core/service.js";
 import { validateRepository } from "../git/index.js";
 import { EXIT_OK, type CommandOutput } from "./output.js";
@@ -18,6 +19,12 @@ export interface InitCommandOptions {
   readonly featureDescription?: string;
   readonly remoteUrl?: string;
   readonly defaultBranch?: string;
+  /**
+   * Explicit per-project state directory (M28.1). Its `atlas.db` is used
+   * for all init writes; a missing file is an actionable error, never
+   * silent provisioning. Omit to use ambient resolution.
+   */
+  readonly stateDir?: string;
 }
 
 /**
@@ -28,10 +35,10 @@ export interface InitCommandOptions {
  * No new semantics: creation validation lives in `src/core/inputs.ts`.
  */
 export async function runInitCommand(
-  options: InitCommandOptions,
+  options: InitCommandOptions & { db?: PrismaClient; stateDatabaseUrl?: string },
   db: PrismaClient = getPrismaClient(),
 ): Promise<CommandOutput> {
-  const name = options.name?.trim() ?? "";
+  const store = options.db ?? db;  const name = options.name?.trim() ?? "";
   const repoPath = options.repoPath?.trim() ?? "";
   const featureTitle = options.featureTitle?.trim() ?? "";
   if (name.length === 0) {
@@ -50,7 +57,7 @@ export async function runInitCommand(
       name,
       ...(options.description !== undefined ? { description: options.description } : {}),
     },
-    db,
+    store,
   );
   const repository = await createRepository(
     {
@@ -60,7 +67,7 @@ export async function runInitCommand(
       ...(options.remoteUrl !== undefined ? { remoteUrl: options.remoteUrl } : {}),
       ...(options.defaultBranch !== undefined ? { defaultBranch: options.defaultBranch } : {}),
     },
-    db,
+    store,
   );
   const feature = await createFeature(
     {
@@ -68,13 +75,14 @@ export async function runInitCommand(
       title: featureTitle,
       ...(options.featureDescription !== undefined ? { description: options.featureDescription } : {}),
     },
-    db,
+    store,
   );
   const human = [
     "atlas init",
     `project: ${project.id} (${project.name})`,
     `repository: ${repository.id} (${repository.localPath})`,
     `feature: ${feature.id} (${feature.title})`,
+    ...(options.stateDatabaseUrl !== undefined ? [`state: ${options.stateDatabaseUrl}`] : []),
     `next: atlas plan --feature ${feature.id} --proposal <proposal-file>`,
   ].join("\n");
   return {
@@ -84,6 +92,7 @@ export async function runInitCommand(
       projectId: project.id,
       repositoryId: repository.id,
       featureId: feature.id,
+      ...(options.stateDatabaseUrl !== undefined ? { stateDatabaseUrl: options.stateDatabaseUrl } : {}),
       nextCommand: `atlas plan --feature ${feature.id} --proposal <proposal-file>`,
     },
   };

@@ -21,3 +21,4 @@ export * from "./provider.js";
 export * from "./validator.js";
 export * from "./convert.js";
 export * from "./planner.js";
+export * from "./routing.js";

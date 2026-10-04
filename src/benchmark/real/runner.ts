@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import { getPrismaClient } from "../../db/client.js";
 import { getCurrentCommit, isClean, pruneWorktrees, removeWorktree, runGit } from "../../git/index.js";
+import { aggregateUsage, ProviderUsageSchema, type ProviderUsage } from "../../workers/usage.js";
 import { BenchmarkError } from "../errors.js";
 import type { BenchmarkStrategy } from "../types.js";
 import {
@@ -32,6 +33,34 @@ export interface RunRealBenchmarkOptions {
   /** Minimum successful runs before a median is reported. Default 1. */
   readonly minSuccessfulRuns?: number;
   readonly scratchParent?: string;
+  /**
+   * Seeded arm-order shuffle (M28.9 screening design): when set, the
+   * strategy order is reshuffled per repeat with a deterministic PRNG, so
+   * arm ordering cannot confound timing. Omit for the historical fixed
+   * order (default, backward compatible).
+   */
+  readonly shuffleSeed?: number;
+}
+
+/** Deterministic Fisher-Yates shuffle (mulberry32). Exported for tests. */
+export function shuffleStrategies<T>(items: readonly T[], seed: number): T[] {
+  const out = [...items];
+  let state = seed >>> 0;
+  const next = (): number => {
+    state |= 0;
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(next() * (i + 1));
+    const a = out[i] as T;
+    const b = out[j] as T;
+    out[i] = b as T;
+    out[j] = a as T;
+  }
+  return out;
 }
 
 const DEFAULT_STRATEGIES: BenchmarkStrategy[] = ["SINGLE_AGENT", "DUMB_PARALLEL", "ATLAS"];
@@ -209,6 +238,68 @@ async function buildRealRunResult(args: {
     ? workerMsValues.reduce((sum, ms) => sum + (ms as number), 0)
     : null;
 
+  // Observed provider usage per task (M28.9): at most one row per task per
+  // invocation exists because the runtime records exactly once per parsed
+  // provider return; repeated rows merge deterministically by summation.
+  // Any task without a well-formed usage row forces null totals (all-or-
+  // null) — partial sums are never presented as run totals.
+  const taskIds = outcome.executed.map((task) => task.taskId);
+  const usageRows =
+    taskIds.length === 0
+      ? []
+      : await db.event.findMany({
+          where: { taskId: { in: taskIds }, type: "PROVIDER_USAGE_OBSERVED" },
+          select: { taskId: true, payload: true },
+          orderBy: [{ id: "asc" }],
+        });
+  const rowsByTask = new Map<string, ProviderUsage[]>();
+  const malformedTasks = new Set<string>();
+  for (const row of usageRows) {
+    if (row.taskId === null) {
+      continue;
+    }
+    let parsed: { usage?: unknown } | null = null;
+    try {
+      parsed = JSON.parse(row.payload ?? "") as { usage?: unknown };
+    } catch {
+      parsed = null;
+    }
+    const usage = parsed === null ? null : ProviderUsageSchema.safeParse(parsed.usage);
+    if (usage === null || !usage.success) {
+      // Unknown bytes exist for this task: its contribution is unknowable,
+      // so the task contributes null (all-or-null), never a partial sum.
+      malformedTasks.add(row.taskId);
+      continue;
+    }
+    const list = rowsByTask.get(row.taskId) ?? [];
+    list.push(usage.data);
+    rowsByTask.set(row.taskId, list);
+  }
+  const perTaskUsage = taskIds.map((taskId) => {
+    if (malformedTasks.has(taskId)) {
+      return null;
+    }
+    const rows = rowsByTask.get(taskId) ?? [];
+    if (rows.length === 0) {
+      return null;
+    }
+    const merged = aggregateUsage(rows);
+    if (merged.tokens === null) {
+      return null;
+    }
+    return ProviderUsageSchema.parse({
+      tokens: merged.tokens,
+      costUsd: merged.costUsd,
+      events: rows.reduce((acc, r) => acc + r.events, 0),
+      malformed: rows.reduce((acc, r) => acc + r.malformed, 0),
+    });
+  });
+  const aggregated = aggregateUsage(perTaskUsage);
+  const usageRecord = {
+    tokens: aggregated.tokens === null ? null : { ...aggregated.tokens },
+    costUsd: aggregated.costUsd,
+  };
+
   const artifactIds = new Set<string>();
   const testRunIds = new Set<string>();
   const commitShas = new Set<string>();
@@ -277,9 +368,10 @@ async function buildRealRunResult(args: {
       codeStats: { filesTouched, linesAdded, linesRemoved },
       workerMsTotal,
     },
-    // The M8/M11 boundary drops provider stdout, so agent-reported usage is
-    // unobservable here. Unknown means unknown — never estimated.
-    usage: { tokens: null, costUsd: null },
+    // Observed provider usage (M28.9): summed from per-task
+    // PROVIDER_USAGE_OBSERVED rows via all-or-null aggregation. Stays null
+    // when any task lacks well-formed usage — unknown means unknown.
+    usage: usageRecord,
     evidence: {
       artifactIds: [...artifactIds].sort(),
       testRunIds: [...testRunIds].sort(),
@@ -382,8 +474,7 @@ export async function runRealBenchmark(
   const repeats = options.repeats ?? 3;
   if (!Number.isInteger(repeats) || repeats < 1) {
     throw new BenchmarkError("repeats must be an integer >= 1");
-  }
-  const minSuccessfulRuns = options.minSuccessfulRuns ?? 1;
+  }  const minSuccessfulRuns = options.minSuccessfulRuns ?? 1;
   if (!Number.isInteger(minSuccessfulRuns) || minSuccessfulRuns < 1) {
     throw new BenchmarkError("minSuccessfulRuns must be an integer >= 1");
   }
@@ -398,7 +489,9 @@ export async function runRealBenchmark(
     const { repoDir, baseCommit } = await buildRealFixture(parsed, fixtureRoot);
     const runs: RealRunResult[] = [];
     for (let repeat = 0; repeat < repeats; repeat += 1) {
-      for (const strategy of strategies) {
+      const order =
+        options.shuffleSeed === undefined ? strategies : shuffleStrategies(strategies, options.shuffleSeed + repeat);
+      for (const strategy of order) {
         const runId = `${parsed.id}-${strategy.toLowerCase().replace(/_/g, "-")}-r${repeat}`;
         const scratchRoot = await mkdtemp(join(parent, `real-bench-run-`));
         runs.push(

@@ -1,6 +1,7 @@
 packages:
   - .
   - apps/web
+  - apps/docs-site
 # pnpm v10+ requires explicit approval for packages that run install scripts
 # (supply-chain security). These are the only build scripts Atlas needs:
 # Prisma engines download + client generation, and esbuild (via Vitest/Vite).

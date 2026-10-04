@@ -1,501 +1,79 @@
-# Atlas V0.1 — Foundation + Core Domain Model
-
-Atlas is an AI Software Engineering Control Plane. V0.1 is a **headless orchestration
-engine** built in stages. Milestone 1 laid the project foundation; Milestone 2 added
-the **core domain model**; Milestone 3 added the **deterministic Git worktree engine**;
-Milestone 4 added the **workspace service**; Milestone 5 added **repository analysis
-and resource claims**; Milestone 6 added the **deterministic dependency graph and
-claim-aware scheduler**; Milestone 7 added the **AI planner boundary** (untrusted
-proposals → deterministic validation → M6 scheduler); Milestone 8 added the
-**controlled worker runtime** (approved task → isolated worktree → provider
-execution → Git diff → claim enforcement → structured result); Milestone 9 added
-**verification + merge train** (Atlas-executed tests, independent verification,
-ordered integration onto a train branch — main is never merged); Milestone 10
-added a **reproducible benchmark harness** comparing `SINGLE_AGENT`,
-`DUMB_PARALLEL`, and `ATLAS` strategies with fake providers only — orchestration
-evidence, never real coding-agent productivity claims; Milestone 11 adds
-**real worker execution** (`CommandWorkerProvider`: argv subprocess in the
-assigned worktree, no shell, bounded output, minimal env) plus a thin
-**feature wave-run loop** (`src/orchestrator/`) composing the M4/M6/M8/M9
-services — schedule → execute → test → verify → COMPLETED → re-plan → train.
-
-## Scope (V0.1 so far)
-
-Included:
-
-- TypeScript Node.js project (strict), managed with pnpm
-- Minimal CLI (`atlas --help`, `atlas doctor`) built with Commander
-- Configuration validation with Zod
-- Prisma + SQLite orchestration-state database (no source code in the DB)
-- Core domain model: 13 entities, explicit state machines, deterministic invariants
-- Git worktree engine: repository inspection + isolated worktree lifecycle (`src/git/`)
-- Workspace service: explicit task→worker assignment with isolated worktrees (`src/workspaces/`)
-- Repository analysis + resource claims: structural resource maps and deterministic
-  conflict detection (`src/analyzer/`, `src/claims/`)
-- Dependency graph + claim-aware scheduler: deterministic execution plans with
-  machine-readable reasons (`src/dag/`); cross-feature dependencies allowed
-- AI planner boundary: untrusted proposals → deterministic validation → M6
-  scheduler (`src/planner/`); providers return data, never authority
-- Controlled worker runtime: approved task → isolated worktree → provider
-  execution → Git diff → claim enforcement → structured result (`src/workers/`);
-  no merging
-- Verification + merge train: Atlas-executed tests, independent verification,
-  and approval-gated ordered integration onto a dedicated train branch
-  (`src/verification/`); main is never merged
-- Real worker execution: subprocess-based provider with argv-only commands,
-  workspace-bound cwd, timeouts, and minimal env (`src/workers/command-provider.ts`)
-- Feature wave-run loop: thin orchestration composing scheduler, assignment,
-  runtime, verification, and merge train with per-round re-planning
-  (`src/orchestrator/`); no second scheduler, no rebase
-- Vitest test suite (config, doctor, database, domain inputs/transitions/persistence, git, workspaces, analyzer, claims, dag, planner, workers, command-provider, verification, benchmark, orchestrator, cli, triage)
-
-Explicitly NOT included (per AGENTS.md):
-
-- Docker execution, production sandboxing, production AI vendor workers
-- Web UI, React, spatial/island UI
-- Redis, queues, WebSockets, auth, multi-user
-- Semantic merge, live rebase, automatic merge to main
-
-## Architecture
-
-- **Git** is the source of truth for source code.
-- **SQLite (via Prisma)** stores Atlas orchestration state only
-  (lifecycle, assignments, metadata, references, append-only events).
-  Never store source code in the database: no blobs, no file contents,
-  no histories — only paths, SHAs, URIs, and hashes.
-- `src/` is modular so future systems slot in without rewiring:
-  `cli/ config/ core/ db/ git/ workers/ planner/ analyzer/ dag/ verification/`
-- `src/core/` is the domain layer: `enums` (lifecycle vocabulary),
-  `inputs` (Zod boundary DTOs), `validation` (deterministic invariants),
-  `transitions` (explicit state machines), `errors` (domain errors),
-  `service` (minimal create/transition/record operations).
-- `src/git/` owns Git truth and never touches Prisma.
-- `src/workspaces/` coordinates the two: `assignTaskToWorker` validates,
-  creates the worktree, then persists Workspace + links + transitions +
-  `TASK_ASSIGNED` event in one Prisma transaction.
-- `src/analyzer/` maps a repository to a deterministic resource map pinned to
-  a Git commit (tracked files only, via `git ls-files`).
-- `src/claims/` models explicit task resource claims (`READ`/`WRITE`),
-  normalizes them, and detects conflicts deterministically — the input a
-  future scheduler will use to judge parallel safety.
-- `src/dag/` answers what could run now: pure `planSchedule` over tasks, edges,
-  claims, workers, and concurrency, emitting an `ExecutionPlan`.
-- `src/planner/` is the AI boundary: providers return untrusted proposals;
-  deterministic validation produces a `ValidatedPlannerPlan` convertible to M6
-  scheduler input. The planner never assigns, executes, or touches Git.
-
-## Core domain model (Milestone 2)
-
-Entities (all persisted via Prisma + SQLite, validated via Zod at the boundary):
-
-| Entity | Role |
-| ------ | ---- |
-| `Project` | Orchestration root; owns repositories and features (`ACTIVE/PAUSED/ARCHIVED`) |
-| `Repository` | Source repo pointer: local path, remote URL, default branch |
-| `Feature` | Requested change; owns tasks (`DRAFT…COMPLETED/CANCELLED`) |
-| `Task` | One executable work unit; priority + JSON resource claims (`path` + `read/write`) |
-| `TaskDependency` | Directed edge: `taskId` waits on `dependsOnTaskId`; cross-feature allowed since M6, never self |
-| `Worker` | AI worker record; links to one task (`IDLE…COMPLETED/FAILED/STOPPED`) |
-| `Workspace` | Isolated workspace record: path/branch; links to one worker |
-| `Artifact` | Evidence reference (patch/commit/test/build/analysis report) — metadata only |
-| `Contract` | Acceptance contract per task (one-to-one) for future verification |
-| `TestRun` | Verification execution (`PENDING→RUNNING→PASSED/FAILED`) with timestamps |
-| `Commit` | Git commit metadata known to Atlas (SHA + branch/workspace); history stays in Git |
-| `Event` | Append-only orchestration log (create/list only — no update/delete API) |
-| `Approval` | Explicit human decision: created `PENDING`, decided once (`APPROVED/REJECTED` + actor + timestamp) |
-
-Key invariants (deterministic, tested): required fields reject empty input;
-self-dependencies rejected (cross-feature edges allowed since M6); duplicate edges, contracts,
-and per-repo commit SHAs rejected; invalid state transitions rejected
-(same-state is an idempotent no-op); approvals need a target and an explicit
-decision; commit SHAs must be 7–40 hex chars.
-
-## Git worktree engine (Milestone 3)
-
-**Why worktrees:** every coding worker must receive an isolated Git worktree and
-never operate on the main working tree. A worker gone wrong can only dirty its
-own worktree; the main checkout stays clean, reviewable, and human-controlled.
-Later milestones map `Task → Worker → Workspace → worktree path/branch`.
-
-**What this milestone supports** (`src/git/`, Git CLI only, no new dependencies):
-
-- `runGit(args, { cwd })` — no-shell execution with captured stdout/stderr/exit code
-- Inspection: `validateRepository`, `getRepositoryRoot`, `getCurrentBranch`
-  (null when detached), `getCurrentCommit`, `getStatus`/`isClean`
-  (staged vs unstaged vs untracked)
-- Branches: `assertValidBranchName`, `branchExists`, `createBranch`
-- Lifecycle: `createWorktree` (`git worktree add -b <branch> <path> <base>`),
-  `getWorktrees`/`getWorktree`/`worktreeExists` (parsed from
-  `git worktree list --porcelain`), `removeWorktree` (needs `force` when dirty),
-  `pruneWorktrees` for stale metadata
-- Branch convention: `atlas/worker/<worker-id>/task/<task-id>` (worker-scoped,
-  so retries by different workers never collide; ids are cuid-style segments,
-  which rules out path traversal)
-
-**Safety rules:** destination must be vacant, outside the repository root, and
-never the main worktree (removal refuses main and unknown paths); all commands
-use argument arrays, never shell strings. Git is the source of truth — Atlas
-re-reads worktree state after every mutation and stores no Git state in Prisma
-(the existing `Workspace` model already has `path`/`branch` fields for the
-future adapter; no schema change was needed).
-
-## Workspace service (Milestone 4)
-
-**How assignment works:** `assignTaskToWorker({ taskId, workerId, repositoryId,
-workspaceRoot, base? })` performs one explicit, manual assignment — there is no
-scheduler. It validates existence and relationships (repository must belong to
-the task's project), requires task `READY` and worker `IDLE`, derives the
-deterministic path `<workspaceRoot>/<projectId>/<workerId>/<taskId>` and the
-Git module's branch `atlas/worker/<worker-id>/task/<task-id>`, creates the
-worktree, then persists the `Workspace` row, links worker↔task↔workspace,
-applies `READY→CLAIMED` / `IDLE→ASSIGNED` / `CREATING→READY` via the existing
-transition machinery, and records a `TASK_ASSIGNED` event — all in a single
-Prisma transaction. Assignment is not execution: the task stops at `CLAIMED`.
-
-**Partial failures:** Git and SQLite cannot share a transaction, so the
-worktree is created first (outside any transaction) and persistence failures
-trigger best-effort forced removal of the new worktree. The original error is
-preserved on `WorkspaceCreationError.originalError`; a failed cleanup is
-reported separately via `cleanupError` instead of replacing it. Git failures
-leave no rows behind because persistence never runs.
-
-**Idempotency:** repeating the identical request returns the existing
-assignment (`alreadyAssigned: true`) with zero side effects — no new worktree,
-row, or event. Conflicting requests (task claimed by another worker, worker
-busy, wrong states) are rejected with typed errors.
-
-**Resolved in M6:** cross-feature task dependencies are now allowed and the
-claim-aware scheduler plans across the resulting DAG (see below).
-
-## Repository analysis + resource claims (Milestone 5)
-
-**Why claims matter:** Atlas must not decide parallelism from coarse labels
-("frontend" vs "backend"). It reasons about actual resources: two tasks
-touching disjoint files may run concurrently, while two tasks writing the
-same file — no matter how different their descriptions sound — conflict.
-This milestone builds that deterministic representation. It does **not**
-schedule workers; it only produces the conflict information a scheduler needs.
-
-**Repository analysis** (`src/analyzer/`): `analyzeRepository(repoPath)` lists
-Git-tracked files (`git ls-files`; never `.git/`, `node_modules`, or OS
-droppings; untracked files are out of scope for V0.1), classifies each into a
-small vocabulary (`FILE`, `DIRECTORY`, `CONFIG`, `SCHEMA`, `MIGRATION`,
-`PACKAGE_MANIFEST`, `LOCKFILE`, `TEST`, `SOURCE`), adds ancestor directories,
-and returns `{ repositoryRoot, analyzedCommit, resources }` sorted
-deterministically. Same repo + same commit ⇒ same map.
-
-**Resource claims** (`src/claims/`): callers submit explicit claims
-(`createTaskClaims({ taskId, claims: [{ resource, access }] })` — never
-LLM-inferred). Paths normalize to canonical repo-relative ids (`./x` →
-`x`, backslashes folded, absolute paths/`..`/`.git` rejected); access is
-`READ` (shareable) or `WRITE` (exclusive, and may name a file the task will
-create — `WRITE` of an absent file is legal, `READ` is not). Claims persist
-in the existing `Task.resourceClaims` column (single store, no competing
-table) and are deduplicated + sorted, so resubmission is byte-identical.
-
-**Conflicts** (`compareClaimSets`): `READ+READ` shares; any `WRITE` on
-overlapping resources conflicts (`WRITE_WRITE`, `READ_WRITE`, `WRITE_READ`).
-Overlap is segment-wise hierarchy — `src/auth/` contains `src/auth/login.ts`
-but never `src/authentication/login.ts`.
-
-```text
-Task A:  WRITE src/auth/login.ts      Task B:  WRITE src/dashboard/page.tsx
-→ no resource conflict
-
-Task C:  WRITE prisma/schema.prisma   Task D:  WRITE prisma/schema.prisma
-→ CONFLICT (WRITE_WRITE)
-```
-
-## Dependency graph + claim-aware scheduler (Milestone 6)
-
-**What it answers:** which tasks are blocked by dependencies, which are ready,
-which may run in parallel, which must serialize over conflicting claims, and
-how worker availability bounds it all. The output is a machine-readable
-`ExecutionPlan` — a decision layer only. Nothing executes, nothing is
-assigned; a later runtime will consume plans via the M4 assignment service.
-
-**Graph** (`src/dag/graph.ts`): `TaskGraph` stores directed `dependsOn` edges
-with sorted traversals, explicit `NotFoundError`/`InvariantViolationError`
-failures, and cycle detection with closed-loop paths (`DependencyCycleError`).
-Topological order breaks ties by smallest task id, so plans never depend on
-insertion order.
-
-**Scheduler** (`src/dag/scheduler.ts`, pure — no Prisma): `planSchedule` takes
-tasks, edges, claims, worker statuses, and `maxConcurrency`, then greedily
-packs dependency-ready tasks (`PENDING`/`READY` with every prerequisite
-`COMPLETED`) into ordered waves bounded by `min(maxConcurrency, idle workers)`,
-keeping each wave claim-conflict-free via the M5 engine. Reasons are explicit:
-`PARALLEL_ELIGIBLE`, `BLOCKED_BY_DEPENDENCY` (with the uncompleted ids),
-`TASK_NOT_READY` (with the offending status), `WORKER_UNAVAILABLE`, and
-`SERIALIZED_RESOURCE_CONFLICT` on the conflicting pairs themselves — a
-resource conflict is reported, never converted into a fake `TaskDependency`.
-
-**Loading** (`src/dag/loader.ts`): `loadSchedulerInput` resolves a seed task
-set plus its transitive prerequisites (cross-feature included) from Prisma
-into the pure input shape. **Cross-feature dependencies are valid as of M6**
-(the M2 same-feature restriction is removed; FK integrity is unchanged).
-
-## AI planner boundary (Milestone 7)
-
-**Core principle:** an AI-generated plan is never an authority. It is an
-untrusted proposal that must pass deterministic Atlas validation before it
-can influence execution. AI proposes → Atlas validates → Atlas schedules →
-human approves → workers execute later.
-
-**Contract** (`src/planner/types.ts`): serializable, strict-Zod `PlannerInput`
-(feature spec + project/repo context + optional analysis pin + existing tasks)
-and `PlannerProposal` (feature id, proposed tasks with claims, proposed
-dependencies, optional rationale/metadata). Extra fields rejected; task ids
-charset-restricted; dependency endpoints must exist in-proposal.
-
-**Validation** (`src/planner/validator.ts`): `validatePlannerProposal` runs
-Zod shape checks, then M5 claim normalization (`InvalidResourceClaimError`
-on bad paths/modes), then M6 `TaskGraph` cycle detection
-(`DependencyCycleError`), then optionally M5 resource-existence checks
-(`WRITE` may name future files, `READ` must match the analysis). Resource
-conflicts stay conflicts — they are never rewritten as dependencies.
-
-**Trust boundary** (`src/planner/provider.ts`, `planner.ts`): `PlannerProvider`
-returns `unknown`, never authority; `runPlanner` validates input, calls the
-provider, validates output — and does nothing else (no assignment,
-worktrees, Git, DB writes, or execution). Only `ValidatedPlannerPlan`
-(discriminant + normalized contents, constructible solely by validation)
-converts via `toSchedulerInput` into M6 input, so the compiler enforces that
-raw proposals cannot reach the scheduler. No persistence, no LLM SDK: tests
-use `FakePlannerProvider`; a vendor provider can implement the interface
-later. Human approval remains required before anything executes.
-
-## Controlled worker runtime (Milestone 8)
-
-**Core principle:** Atlas controls the execution boundary; the AI worker only
-implements inside it. `executeTask({ taskId, workerId, expectedBaseCommit },
-provider)` runs: approval gate (explicit `APPROVED` decision required) →
-state gate → workspace gate (DB record authoritative, main worktree rejected)
-→ base-commit gate → atomic slot acquisition (task `CLAIMED→IN_PROGRESS`,
-worker `ASSIGNED→RUNNING` in one transaction) → provider executes inside the
-assigned worktree → Git diff inspection → claim enforcement → terminal states
-+ `WorkerExecutionResult`. No merging; the branch/worktree stays isolated.
-
-**Claim enforcement** (`src/workers/runtime.ts`): actual modifications (from
-`git diff`, never provider self-report) must be covered by `WRITE` claims
-under M5 segment-overlap semantics — a `WRITE src/auth/` covers
-`src/auth/login.ts`, while `WRITE src/auth/login.ts` does not cover
-`src/auth/session.ts`. Uncovered paths yield `CLAIM_VIOLATION` (worker and
-task `FAILED`, never silently completed).
-
-**Provider boundary** (`src/workers/provider.ts`): `WorkerProvider` returns
-`unknown` and receives minimum context only (ids, workspace path, title,
-claims, base commit — no secrets, no env). Strict output validation rejects
-smuggled fields; provider test self-reports are metadata, never evidence
-(no `TestRun` rows are fabricated). Tests use `FakeWorkerProvider`
-(confined file ops, optional commit). This is application-level isolation,
-not OS/container sandboxing — that hardening is future work.
-
-## Verification + merge train (Milestone 9)
-
-**Core principle:** the merge train integrates only work Atlas itself has
-verified. Provider claims are never evidence; only Atlas-executed processes,
-Git-observed state, and explicit human approvals count.
-
-**Test execution** (`src/verification/tests.ts`): `runTests({ taskId, workdir,
-command?, timeoutMs? })` runs the repository's configured test command
-(`package.json` `scripts.test`, or an explicit argv array — never a shell
-string, never an invented default) via `execFile`, capturing command, exit
-code, stdout/stderr, and duration. Exit 0 → `PASSED`; non-zero/timeout →
-`FAILED`; abort → `CANCELLED`. Each run persists a `TestRun` row
-(`PENDING→RUNNING→terminal`, exit code plus bounded output in metadata).
-
-**Verification** (`src/verification/verify.ts`): `verifyExecution` re-derives
-everything independently — worker→task→workspace links, worktree
-registration (never main), base-commit ancestry, claim coverage of the fresh
-diff, and one cited Atlas-executed `PASSED` `TestRun` belonging to the task
-with exit code 0. Result is a structured `VERIFIED`/`REJECTED` verdict with
-per-check details, reasons, and a recorded `ANALYSIS_REPORT` artifact.
-
-**Merge train** (`src/verification/mergetrain.ts`): `runMergeTrain` requires
-an explicit `APPROVED` decision up front, then integrates items in sorted
-task-id order onto a dedicated train branch (created from the base commit in
-an Atlas-owned worktree): re-verify, require committed-clean worker trees,
-`merge --no-ff --no-commit`, abort + halt with `CONFLICT` on conflicts, run
-cumulative tests in the train worktree, abort + halt with `TESTS_FAILED` on
-failure, otherwise commit each merge and record `Commit` + `COMMIT` artifact
-rows. Worker worktrees are only read, never modified; `main` is never
-checked out, merged, or otherwise touched — the train branch awaits human
-approval for any future main-branch step.
-
-## Benchmark harness (Milestone 10)
-
-**Thesis under test:** claim-aware orchestration determines safe parallelism
-and integrates work faster and more reliably than a single strong agent —
-measured, not assumed. Three strategies run the same feature from the same
-base commit: `SINGLE_AGENT` (one synthetic task, union of files/claims),
-`DUMB_PARALLEL` (identical decomposition, concurrent execution, sorted-order
-train, no scheduler), and `ATLAS` (planner → validation → claim-aware waves →
-ordered train). Every run carries `provenance: "fake-provider"`.
-
-**Fairness rules enforced in code** (`src/benchmark/runner.ts`): main HEAD +
-cleanliness asserted before and after every strategy run; per-run branches,
-workspaces, and DB rows; sequential execution; all filesystem state removed
-in `finally` (worktree removal + `pruneWorktrees`); identical verification
-bar and identical merge machinery for all strategies.
-
-**Three conflicts, never conflated:** *resource-claim conflict* (scheduler
-input), *Git merge conflict* (only counted from `CONFLICT` train items), and
-*semantic conflict* (not measured — no such metric exists). Raw observations
-come first; only directly supported derivations (`speedupVsSingle`,
-`costDeltaVsSingle` from declared simulated costs, failure/conflict/rework
-rates) are computed. Assessment findings (`ATLAS_SERIALIZED`,
-`SINGLE_AGENT_FASTER`, …) are data for later kill-criteria evaluation, never
-verdicts. Fake timing/cost prove orchestration behavior only.
-
-**Expected outcomes on overlapping writes:** for scenarios where two tasks
-rewrite the same lines (e.g. `shared-counter`, `auth-billing-shared-config`),
-`HALTED + conflict` **is the expected ATLAS result**. Serialization moves the
-conflict out of execution (workers never run concurrently on the same
-resource) but does not eliminate it: both workers are still based on the same
-original base commit, so their outputs genuinely collide in the merge train.
-The metric records that Atlas serialized correctly *and* that the outputs
-genuinely conflict — both facts are true at once.
-
-**Serial scheduling means serial worker execution only.** Later workers are
-NOT rebased onto earlier integrated work; each worker's worktree stays based
-on the original base commit from planning time. Consequently, workers that ran
-in different waves can still produce a Git merge conflict when their branches
-are merged in sequence during the ordered train. No auto-resolution is
-attempted — the train halts on the first conflict and records it as evidence.
-This is intentional V0.1 behavior: rebase, re-plan-after-wave, and
-conflict-aware rescheduling are explicitly out of scope (see AGENTS.md).
-
-## Real worker execution + wave-run loop (Milestone 11)
-
-**Thesis under test:** Atlas can take real tasks, isolate them into
-worktrees, execute a real worker *process*, observe the resulting Git diff,
-enforce resource claims, run tests, verify the execution, and integrate the
-result through the existing merge train — without changing the M8 trust
-boundary.
-
-**CommandWorkerProvider** (`src/workers/command-provider.ts`): implements the
-unchanged M8 `WorkerProvider` interface via `node:child_process` `execFile`
-(argv array, never a shell). `cwd` is always the Atlas-assigned
-`workspacePath` — the config schema is strict and cannot name a workspace.
-Timeouts kill and fail the run; stdout/stderr are captured into bounded
-`notes` (informational only, never authority — the M8 Git diff stays the
-source of truth); non-zero exits throw, which the runtime maps to structured
-`FAILED` exactly like any throwing provider. The child receives only `PATH`
-plus explicitly allowlisted variable names (default: none) — secrets are
-never forwarded because provider input carries none by construction.
-
-**Wave-run loop** (`src/orchestrator/run-loop.ts`): `runFeatureWaveLoop`
-composes existing services and duplicates none — `loadSchedulerInput` +
-`planSchedule` (M6) → per-task approval → `assignTaskToWorker` (M4) →
-`executeTask` (M8) → `runTests` + `verifyExecution` (M9) → `VERIFIED` tasks
-transition to `COMPLETED` → reload fresh state and re-plan → repeat → one
-approval-gated `runMergeTrain` in wave order. Per-task operational failures
-(`CLAIM_VIOLATION`, `FAILED`, failed tests, `REJECTED`) live in `outcomes`;
-only genuine loop/config failures throw (`OrchestratorError`). Re-planning
-schedules remaining work again — it never rebases or recreates branches.
-
-**Deterministic script-agent** (`tests/fixtures/script-agent.mjs`, tests
-only): hermetic Node script proving the subprocess boundary without network
-or LLMs — write/delete/sleep/fail/garbage/absolute-path/env-print/commit
-modes covering success, no-op, violation, timeout, failure, stdout
-indifference, confinement, and env filtering.
-
-**Not a sandbox.** M11 is process/worktree isolation: a hostile child could
-still touch the wider filesystem (an absolute-path write is simply invisible
-to worktree-scoped claim enforcement — covered by a test documenting exactly
-this). Docker/microVM sandboxing remains future work and is not claimed.
-
-## Developer CLI workflow (Milestone 12)
-
-**Scope:** `atlas` is a thin adapter over the M1–M11 engine — three commands,
-no duplicated domain logic. `atlas doctor` is unchanged.
-
-**`atlas plan --feature <id> --proposal <file>`** reads an untrusted proposal
-JSON file, validates it deterministically (M7, proposal `featureId` must
-match `--feature`), persists tasks/claims/dependencies once (re-runs reuse
-the existing approval via a `sha256` binding — never duplicate tasks), and
-prints a scheduler preview computed by the real M6 scheduler with
-hypothetical workers (display only; nothing is created or executed). It
-creates a `PENDING` plan approval (`context: m12-plan`); `--approve --actor
-<name>` re-validates the file and decides it via the existing Approval API.
-Approving a changed file is refused.
-
-**`atlas run --feature <id> --repository <id> --plan-approval <id> --actor
-<name> --agent <exe> [--agent-arg …] --approve-merge`** executes nothing
-until authorized: the plan approval must already be `APPROVED`, and without
-`--approve-merge` the command exits before any work starts. With it, the CLI
-creates a `PENDING` merge approval bound to the plan approval and decides it
-`APPROVED` — the flag is only the mechanism invoking the decision API; the
-persisted row is the record. It then calls `runFeatureWaveLoop` with a
-`CommandWorkerProvider` factory (argv-only, no shell). Base defaults to
-repository HEAD; workspaces/train default under `.atlas/`. Exit 0 only on a
-fully verified + integrated run; exit 2 reports truthful-but-unfavorable
-outcomes (halted train, failures, violations). `--json` prints the same
-result objects machine-readably on either command.
-
-## Integration triage (Milestone 13)
-
-**Scope:** a read-only deterministic evidence layer over halted merge trains
-(`src/triage/`). When sibling worker branches collide, triage turns the halt
-into an actionable report instead of a bare `HALTED` status — without
-rebasing, resolving, or modifying anything. The human remains the final
-authority.
-
-**How it works:** `triageIntegrationHalt` replays the halted merge in a
-throwaway worktree (created at the train's halt commit, always removed in
-`finally` — main, train, and worker state are never touched) to get
-Git-confirmed unmerged paths; attributes each file to earlier tasks via
-branch diffs through worker → workspace records (never titles — unprovable
-ownership is reported unknown); compares declared claims with the existing
-M5 engine; reads dependency direction through the existing M6 graph; and
-flags semantic risk with explicit `notProven: true` markers.
-
-**Classifications** (combinable, evidence-backed only): `CLAIM_CONFLICT`
-(declared claims overlap), `GIT_CONFLICT` (Git reports unmerged paths),
-`DEPENDENCY_ORDERING` (an edge exists between the colliding tasks),
-`SEMANTIC_RISK` (review signal, semantics never claimed), `UNKNOWN`
-(insufficient evidence — never invented). Recommended actions are a fixed
-advisory vocabulary (review files, revise claims, reorder, replan); triage
-executes none of them. The report is JSON-serializable and recorded as one
-`ANALYSIS_REPORT` artifact; no Prisma changes, no new dependencies. The
-orchestrator attaches it as `WaveLoopResult.triage` on `HALTED` trains only —
-a triage failure degrades to `null` and can never turn a merge failure into
-success.
-
-## Real-agent benchmark (Milestone 14, experimental)
-
-**Scope:** a controlled orchestration comparison with the coding agent held
-constant (`src/benchmark/real/`, additive — the M10 synthetic benchmark is
-untouched and separate). It answers whether Atlas's orchestration decisions
-improve reliable parallel development, never which agent is better.
-
-**Experiment:** same repository, base commit, human-authored decomposition,
-claims, prompts, agent, and verification bar across `SINGLE_AGENT` (union
-prompt, one worker), `DUMB_PARALLEL` (same tasks, concurrent, unscheduled),
-and `ATLAS` (the shipped M11 wave loop). One shared prompt renderer feeds
-every arm identical bytes, so prompt quality cannot explain a gap; six small
-synthetic multi-file workloads with real `node:test` suites cover
-independent, shared-resource, chain, mixed, false-parallelism, and
-order-sensitive integration work.
-
-**Outcomes:** SUCCESS requires every intended task completed, verified,
-non-empty, and integrated — success rate is the primary metric, median
-successful wall-clock the secondary; individual runs are always kept,
-medians never fabricated from zero successes. Usage/cost is reported only
-when the agent exposes it (the M8/M11 boundary drops provider stdout, so it
-is honestly `null`, never estimated). Semantic correctness is not
-automatically measured. Real-agent results are experimental evidence about
-orchestration, not productivity claims.
-
-## Prerequisites
-
-- Node.js >= 20
-- pnpm (`npm install -g pnpm`)
-- Git
-- Docker (checked by `atlas doctor`; daemon does not need to run workers yet)
-
-## Setup
+# Atlas — Control plane for AI coding agents
+
+Atlas is an **experimental open-source control plane** for orchestrating AI coding workers with
+isolation, verification, and human control. Instead of letting agents share one checkout and
+self-report success, Atlas decomposes a feature into claimed tasks, runs each worker in its own
+Git worktree, verifies the work itself, and integrates results in order — with a human approving
+every consequential step.
+
+Repository: <https://github.com/Ankit95040/Atlas>
+
+> **Status: experimental (v0.1).** Atlas is a research prototype, not a production tool.
+> There are no customers, no production deployments, and no proven commercial value.
+> Benchmark evidence is published with its limitations (see [What is not yet proven](#what-is-not-yet-proven)).
+
+## What Atlas is trying to solve
+
+AI coding agents can write code, but coordinating them is unsafe by default: shared checkouts get
+dirty, concurrent edits silently overwrite each other, "it works" is self-reported, and
+integration order is accidental. Atlas treats agent coordination as a control problem:
+
+- **Isolation before trust** — one worktree and branch per worker, created outside the repository root.
+- **Contracts over labels** — tasks declare the exact paths they may write; anything else fails with evidence.
+- **Evidence over self-report** — verification cites the Atlas-executed test run, never the provider's claim.
+- **Recoverability by construction** — stuck states exit only through narrow, actor-recorded transitions.
+- **Human authority at both boundaries** — plan approval starts execution; merge approval starts integration.
+
+## How the execution model works
+
+1. **Human specification** — a feature description enters the system (`atlas init` creates the project, repository, and feature rows).
+2. **Planning** — an untrusted proposal (JSON) is deterministically validated into tasks, resource claims, and dependencies (`atlas plan`). Validation rejects bad shapes, bad claims, and dependency cycles.
+3. **Dependency and task boundaries** — a claim-aware scheduler packs dependency-ready tasks into ordered waves; each wave is conflict-free over declared `READ`/`WRITE` resource claims.
+4. **Human approval** — execution starts only after an explicit `APPROVED` plan decision, and integration starts only with an explicit merge approval. Both record an actor. There are no silent defaults.
+5. **Isolated workers** — each task executes in its own Git worktree on its own branch. The provider runs as an argv-only subprocess with the worktree as `cwd`; it never chooses where it runs.
+6. **Verification** — Atlas runs the repository's test command itself and re-derives links, worktree registration, base-commit ancestry, and claim coverage of the observed Git diff. The verdict is `VERIFIED` or `REJECTED` with per-check details.
+7. **Ordered merge train** — verified items merge in order onto a dedicated train branch. Conflicts halt loudly with the item named; tests re-run cumulatively.
+8. **Human-controlled final integration** — Atlas never merges `main`. The train branch waits; a human merges.
+
+Supporting operations: `atlas status` / `show` / `history` / `claims` / `diagnose` are read-only
+inspection; `atlas recover task` releases stranded assignments and `atlas task transition` moves
+stuck tasks along one allowed edge — both require an actor and a reason.
+
+## Current capabilities
+
+- Strict TypeScript engine (Node.js ≥ 20) with Zod-validated boundaries and Prisma + SQLite orchestration state (lifecycle and metadata only — never source code).
+- Git worktree lifecycle engine (Git CLI, argument arrays, no shell strings).
+- Deterministic repository analysis, resource-claim conflict detection, and claim-aware scheduling.
+- Untrusted-proposal planner boundary with deterministic validation.
+- Controlled worker runtime with Git-diff claim enforcement (`CLAIM_VIOLATION` on undeclared writes).
+- Atlas-executed verification and approval-gated ordered merge train.
+- Real subprocess worker provider (`CommandWorkerProvider`) plus a scriptable test agent.
+- Reproducible benchmark harnesses (synthetic strategies, real-agent comparisons, scale workloads) with machine-readable provenance.
+- Read-only execution API + Server-Side Rendered dashboard and React projection UI (see monorepo notes).
+- Documentation and research website (`apps/docs-site/`) with the full experiment archive.
+
+## What is not yet proven
+
+- **Product-market fit is unproven.** There are no users beyond the authors and no production evidence.
+- **Automatic execution routing is disabled.** Routing analysis is advisory only; a human approves every run.
+- **Isolation is process/worktree-level, not sandboxed.** A hostile worker process could touch the wider filesystem; Docker/microVM sandboxing is future work.
+- **Semantic correctness is not automatically measured.** Verification proves tests pass and claims hold, not that the code is right.
+- **Real-provider experiments hit stalls and inconsistent availability** (documented in the M28–M29 reports).
+
+## Honest benchmark limitations
+
+The full record lives in `docs/reports/` and the research archive on the documentation site.
+The headline facts, with sample sizes stated beside every claim:
+
+- **Single-agent execution was faster in every measured comparison** (e.g. M29.0: independent tasks ~30s vs ~37s; migration chains ~38s vs ~107s; n=5 per cell, one free model, synthetic fixtures).
+- Atlas reached **verified-success parity** with single-agent workflows on tested fixtures — not superiority.
+- Shared-file runs that genuinely conflict **correctly halted (0/5)** — halts are the train working as designed, not failures.
+- We have **not established** whether conflict prevention and auditability justify the added complexity (see `docs/reports/M29.6-PRODUCT-VALUE-AUDIT.md`).
+- Quarantined, inconclusive, and negative results are published alongside positive ones. Do not cite Atlas numbers as productivity claims.
+
+## Installation and setup
+
+Prerequisites: Node.js ≥ 20, pnpm (`npm install -g pnpm`), Git. `atlas doctor` also checks Docker.
 
 ```sh
 cp .env.example .env
@@ -504,58 +82,112 @@ pnpm db:migrate
 pnpm build
 ```
 
-## Usage
+| Script             | Purpose                           |
+| ------------------ | --------------------------------- |
+| `pnpm build`       | Compile TypeScript to `dist/`     |
+| `pnpm typecheck`   | Strict typecheck (`tsc --noEmit`) |
+| `pnpm test`        | Run the Vitest suite              |
+| `pnpm atlas`       | Run the built CLI                 |
+| `pnpm doctor`      | Run `atlas doctor`                |
+| `pnpm db:generate` | Generate the Prisma client        |
+| `pnpm db:migrate`  | Apply database migrations (dev)   |
+
+`atlas doctor` checks Node.js (≥ 20), Git, Docker, Atlas configuration, and database connectivity.
+
+## CLI quick start
 
 ```sh
-pnpm atlas -- --help
-pnpm atlas -- doctor
+# One-time: create the project, repository, and feature rows for a Git checkout.
 pnpm atlas -- init --name <project> --repo-path <git-checkout> --feature-title <title>
-pnpm atlas -- plan --feature <featureId> --proposal proposal.json [--approve --actor <name>]
-pnpm atlas -- run --feature <featureId> --repository <repoId> --plan-approval <approvalId> --actor <name> --agent <exe> [--agent-arg <arg> ...] --approve-merge
+
+# Validate a proposal file into tasks (persists nothing executable yet).
+pnpm atlas -- plan --feature <featureId> --proposal proposal.json
+
+# Approve the plan (records you as the actor), then execute with an explicit worker.
+pnpm atlas -- plan --feature <featureId> --proposal proposal.json --approve --actor <name>
+pnpm atlas -- run --feature <featureId> --repository <repoId> \
+  --plan-approval <approvalId> --actor <name> \
+  --agent <executable> [--agent-arg <arg> ...] --approve-merge
+
+# Inspect (all read-only):
 pnpm atlas -- status <featureId>
-pnpm atlas -- show run <featureId> | show task <taskId> | show worker <workerId>
-pnpm atlas -- history <featureId> | claims <featureId> | diagnose <featureId>
+pnpm atlas -- show run <runId>
+pnpm atlas -- history <featureId>
+pnpm atlas -- claims <featureId>
+pnpm atlas -- diagnose <featureId>
+
+# Recover (both record actor + reason):
 pnpm atlas -- recover task <taskId> --actor <name>
 pnpm atlas -- task transition <taskId> --to <status> --actor <name> --reason <text>
-# after `pnpm build`, the local bin also works:
-./node_modules/.bin/atlas --help
-./node_modules/.bin/atlas doctor
 ```
 
-New here? Start with `docs/GETTING_STARTED.md` (clean machine to first
-run), and keep `docs/RECOVERY_RUNBOOK.md` nearby when operating real runs
-(failure taxonomy, `recover`, `task transition`, what never to do).
+`atlas run` exits non-zero unless the run is fully verified and integrated; `--json` prints
+machine-readable results. New here? Start with `docs/GETTING_STARTED.md`, and keep
+`docs/RECOVERY_RUNBOOK.md` nearby when operating real runs.
 
-`atlas doctor` checks:
+## Monorepo structure
 
-1. Node.js availability (>= v20)
-2. Git availability (`git --version`)
-3. Docker availability (`docker --version`)
-4. Atlas configuration (Zod-validated env)
-5. SQLite/Prisma database connectivity (`SELECT 1`)
+```text
+src/              Atlas engine: cli, config, core, db, git, workspaces,
+                  analyzer, claims, dag, planner, workers, verification,
+                  orchestrator, benchmark, triage, ui
+prisma/           SQLite schema + migrations (orchestration state only)
+tests/            Vitest suite (unit + integration; real-provider tests need approval to run)
+fixtures/         Test fixtures (see note below)
+docs/             Getting-started guide, recovery runbook, design notes,
+                  experiment designs, research reports
+apps/docs-site/   Documentation + research website (React + Vite; publishes the
+                  guides and the full experiment archive)
+apps/web/         Experimental projection UI — deferred from this release
+                  pending independent review of its in-progress migration.
+                  `apps/web` contains an experimental M26 frontend proof of concept
+                  and is not a production-ready application.
+```
 
-## Scripts
+**Fixture note:** `fixtures/m18/scale/` holds vendored upstream sources used only as scale-benchmark
+inputs (mocha, node-semver, postcss, showdown — each retains its own `LICENSE`, all MIT/ISC upstream
+terms). These trees are **excluded from the public release snapshot**; to reproduce the scale
+workloads locally, check out the pinned upstream tags recorded in `src/benchmark/scale/workloads.ts`
+into `fixtures/m18/scale/<name>-<version>/`.
 
-| Script            | Purpose                              |
-| ----------------- | ------------------------------------ |
-| `pnpm build`      | Compile TypeScript to `dist/`        |
-| `pnpm typecheck`  | Strict typecheck (`tsc --noEmit`)    |
-| `pnpm test`       | Run Vitest suite                     |
-| `pnpm atlas`      | Run the built CLI                    |
-| `pnpm db:generate`| Generate Prisma client               |
-| `pnpm db:migrate` | Apply database migrations (dev)      |
+## Documentation website development
 
-## Dependencies — why each exists
+```sh
+pnpm --filter @atlas/docs-site install   # first time (or pnpm install at root)
+pnpm --filter @atlas/docs-site typecheck
+pnpm --filter @atlas/docs-site test
+pnpm --filter @atlas/docs-site build
+pnpm --filter @atlas/docs-site preview   # serve the production build locally
+```
 
-| Package           | Reason required (V0.1)                              |
-| ----------------- | --------------------------------------------------- |
-| `commander`       | Minimal CLI framework for `atlas --help` / `doctor` |
-| `zod`             | Deterministic configuration validation              |
-| `@prisma/client`  | Type-safe access to SQLite orchestration state      |
-| `dotenv`          | Load `DATABASE_URL` from `.env` into CLI/tests      |
-| `prisma` (dev)    | Schema management + migrations + client generation  |
-| `typescript` (dev)| Strict typechecking + build                         |
-| `vitest` (dev)    | Test runner for config/doctor/db                    |
-| `@types/node` (dev)| Node.js type definitions                           |
+The site uses hash routing, persists Dark/Light/System theme choice without a flash of the wrong
+theme, and links to the GitHub repository and issue tracker. The contact email is intentionally
+unconfigured — GitHub Issues is the primary contact route until a real address is supplied in
+`apps/docs-site/src/content/site.ts`.
 
-No other runtime dependencies are added in this milestone.
+## Contributing
+
+Atlas is experimental open source and the most valuable contributions preserve its honesty
+guarantees: falsifiable experiments, tighter verification, and independent audits of the benchmark
+claims. Good starting points: reproducing an experiment from `docs/reports/`, challenging a
+benchmark assumption, improving worker isolation or recovery, or improving the documentation.
+
+1. Open an issue at <https://github.com/Ankit95040/Atlas/issues> describing the change.
+2. Keep the safety invariants: human approval stays mandatory, Git stays the source of truth,
+   workers stay isolated, `main` is never auto-merged.
+3. Add or update tests for behavior changes; run `pnpm typecheck` and the affected suites.
+4. Do not include secrets, local paths, database files, or generated output in contributions.
+
+## Security reporting
+
+Atlas executes AI-directed code via subprocess workers. If you find a vulnerability — especially
+workspace escape, claim-enforcement bypass, approval forgery, or secret forwarding to providers —
+please report it privately via <https://github.com/Ankit95040/Atlas/issues> (a private channel
+will be documented once triage is staffed) rather than opening a public exploit. Do not probe
+systems you do not own. There is currently no paid bounty program.
+
+## License
+
+MIT — see [LICENSE](./LICENSE). The MIT license covers Atlas-authored project code; vendored
+third-party components (excluded from the release snapshot) and `node_modules` dependencies
+remain under their own upstream licenses.

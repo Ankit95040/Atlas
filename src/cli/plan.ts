@@ -13,6 +13,7 @@ import {
 import { createTaskClaims } from "../claims/index.js";
 import { planSchedule } from "../dag/index.js";
 import { toSchedulerInput, validatePlannerProposal, type ValidatedPlannerPlan } from "../planner/index.js";
+import { recommendRoute } from "../planner/routing.js";
 import { EXIT_OK, type CommandOutput } from "./output.js";
 
 export const PLAN_APPROVAL_CONTEXT = "m12-plan";
@@ -213,6 +214,14 @@ export async function runPlanCommand(
     (conflict) => `  - ${conflict.taskA} <-> ${conflict.taskB} (${conflict.details.map((detail) => detail.kind).join(", ")})`,
   );
   const blockedLines = preview.blockedTasks.map((entry) => `  - ${entry.taskId}: ${entry.reason}`);
+  // Advisory execution-strategy recommendation (M29.3 Phase 1/3): computed
+  // over the validated proposal, recorded for human review. It never
+  // changes what plan persists or approves; the approval below covers the
+  // exact task list shown, whatever its shape. Approving a shape that
+  // diverges from the recommendation IS the auditable override: the
+  // recommendation, the approval actor/timestamp, and the run-time actual
+  // are all recorded separately.
+  const routingRecommendation = recommendRoute(validated.tasks, validated.dependencies);
   const human = [
     `atlas plan`,
     `feature: ${feature.id}`,
@@ -228,6 +237,7 @@ export async function runPlanCommand(
     alreadyApproved
       ? `plan approval: ${approvalId} (already APPROVED)`
       : `plan approval: ${approvalId} (${approvalStatus})`,
+    `routing (advisory): recommended=${routingRecommendation.route} :: ${routingRecommendation.reasons.map((r) => r.detail).join(" | ")}`,
   ].join("\n");
 
   return {
@@ -237,6 +247,7 @@ export async function runPlanCommand(
       featureId: feature.id,
       proposalHash: hash,
       approval: { id: approvalId, status: approvalStatus },
+      routingRecommendation,
       tasks: validated.tasks.map((task) => ({
         id: task.id,
         title: task.title,
